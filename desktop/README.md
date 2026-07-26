@@ -23,3 +23,8 @@ Desktop chat shell with:
 - `src/shared` - reusable app-wide code (`ui`, `lib`, `styles`)
 - `src/features` - feature modules (vertical slices)
 - `src/app` - top-level app composition
+
+## Troubleshooting
+
+- Crashes or a blank window on Linux (Wayland, AMD/NVIDIA): see
+  [docs/desktop-linux-troubleshooting.md](../docs/desktop-linux-troubleshooting.md)
