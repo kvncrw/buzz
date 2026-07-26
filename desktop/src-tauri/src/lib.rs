@@ -135,6 +135,26 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK's DMA-BUF renderer crashes the WebKitWebProcess (core dump,
+    // no window ever appears) on some Linux GPU/driver stacks: confirmed for
+    // the Buzz AppImage on Intel Mesa under the rootless-XWayland path the
+    // AppImage always takes — linuxdeploy's GTK apprun hook pins
+    // GDK_BACKEND=x11 (https://github.com/tauri-apps/tauri/issues/8541) —
+    // and widely reported on NVIDIA under Wayland ("Error 71 dispatching to
+    // Wayland display"). Falling back to WebKit's shared-memory renderer
+    // avoids the crash at a small rendering cost; on stacks where DMA-BUF
+    // works the app renders identically. This is the fix Tauri documents for
+    // app authors (https://v2.tauri.app/develop/debug/linux-graphics/) and
+    // the one https://github.com/block/buzz/issues/2338 confirmed for Buzz.
+    // It must run before the first GTK/WebKit call in this process, hence
+    // the top of run(). A pre-set value (e.g. "0" to force the DMA-BUF path
+    // back on) is respected; on non-Linux platforms and non-WebKitGTK
+    // webviews the variable has no meaning.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     // mesh-llm's async chains (model download, node start/join) overflow
     // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
     // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
