@@ -1,0 +1,79 @@
+name: pagoda sync
+
+# Keep the fork tracking upstream: fast-forward `main` to block/buzz main,
+# merge it plus every patch in .pagoda/patches.txt into `pagoda`, push both.
+# If pagoda moved, build the relay image and the Linux desktop release.
+# (Pushes made with GITHUB_TOKEN do not fire `on: push`, hence workflow_call.)
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: pagoda-sync
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  sync:
+    name: Sync pagoda with upstream
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      pagoda_sha: ${{ steps.sync.outputs.pagoda_sha }}
+    steps:
+      - name: Checkout pagoda
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: pagoda
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "pagoda-sync[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run sync
+        id: sync
+        env:
+          PAGODA_FORK_REMOTE: origin
+        run: bash .pagoda/sync.sh
+
+      - name: Push main and pagoda
+        env:
+          MAIN_SHA: ${{ steps.sync.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+          # Both are fast-forwards by construction; a non-ff push fails loudly.
+          git push origin "${MAIN_SHA}:refs/heads/main"
+          git push origin pagoda:refs/heads/pagoda
+          echo "main=${MAIN_SHA} pagoda=$(git rev-parse HEAD) changed=${{ steps.sync.outputs.changed }}" >> "$GITHUB_STEP_SUMMARY"
+
+  relay-image:
+    name: Relay image
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    uses: ./.github/workflows/pagoda-relay-image.yml
+    with:
+      ref: ${{ needs.sync.outputs.pagoda_sha }}
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+
+  desktop-linux:
+    name: Desktop Linux
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    uses: ./.github/workflows/pagoda-desktop-linux.yml
+    with:
+      ref: ${{ needs.sync.outputs.pagoda_sha }}
+    permissions:
+      contents: write
+    secrets: inherit

@@ -1,0 +1,171 @@
+name: pagoda relay image
+
+# Fork build of the Buzz relay image from the `pagoda` integration branch.
+# Derived from upstream docker.yml with the qualify, push-gateway and
+# attestation parts removed; linux/amd64 only. Publishes
+# <GHCR_IMAGE>:pagoda and :sha-<7>, then (only when the repo variable
+# RELAY_AUTO_DEPLOY is 'true') points the Railway relay at the digest.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit or branch to build (default: the triggering sha)"
+        type: string
+        required: false
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit or branch to build (default: the triggering sha)"
+        type: string
+        required: false
+  push:
+    branches: [pagoda]
+    paths-ignore:
+      - ".pagoda/**"
+      - ".github/workflows/pagoda-desktop-linux.yml"
+      - ".github/workflows/pagoda-sync.yml"
+      - "**.md"
+
+concurrency:
+  group: pagoda-relay-image-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  IMAGE_NAME: ${{ vars.GHCR_IMAGE != '' && vars.GHCR_IMAGE || 'ghcr.io/kvncrw/buzz' }}
+
+jobs:
+  build:
+    name: Build (linux/amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ env.IMAGE_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The sync workflow pushes pagoda and then calls this workflow, so
+      # github.sha can be stale; take the sha from the checkout instead.
+      - name: Resolve source sha
+        id: src
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        with:
+          # Default parallelism of 4 OOMs the 7GB GitHub runner during Rust
+          # compiles (see moby/buildkit#3969).
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=pagoda
+            type=raw,value=sha-${{ steps.src.outputs.short }}
+          # The Dockerfile hardcodes the upstream source label; override it
+          # here so the GHCR package links to the fork.
+          labels: |
+            org.opencontainers.image.title=Buzz (pagoda fork)
+            org.opencontainers.image.description=WebSocket relay server for the Buzz communications platform, kvncrw/buzz pagoda branch
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUZZ_SOURCE_SHA=${{ steps.src.outputs.sha }}
+            BUZZ_BUILD_ID=github-actions:${{ github.run_id }}:${{ github.run_attempt }}
+            BUZZ_BUILD_URL=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:amd64
+          cache-to: type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:amd64,mode=max,compression=zstd
+
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+          SOURCE_SHA: ${{ steps.src.outputs.sha }}
+        run: |
+          {
+            echo "### Published \`${IMAGE_NAME}\`"
+            echo
+            echo "**Digest:** \`${DIGEST}\`"
+            echo "**Source:** \`${SOURCE_SHA}\`"
+            echo
+            echo '```'
+            echo "${META_TAGS}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to Railway
+    needs: build
+    if: vars.RELAY_AUTO_DEPLOY == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Update image and redeploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RELAY_READINESS_URL: ${{ vars.RELAY_READINESS_URL || 'https://buzz.pagodatechnology.com/_readiness' }}
+          IMAGE_REF: ${{ needs.build.outputs.image }}:pagoda@${{ needs.build.outputs.digest }}
+        run: bash .pagoda/railway-deploy.sh --image "$IMAGE_REF"
+
+  deploy-skipped:
+    name: Deploy (manual, RELAY_AUTO_DEPLOY not set)
+    needs: build
+    if: vars.RELAY_AUTO_DEPLOY != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Print the image to deploy by hand
+        env:
+          IMAGE_REF: ${{ needs.build.outputs.image }}:pagoda@${{ needs.build.outputs.digest }}
+        run: |
+          echo "RELAY_AUTO_DEPLOY is not 'true'; not touching Railway."
+          echo "Image ready: $IMAGE_REF"
+          echo "To deploy: RAILWAY_TOKEN=... .pagoda/railway-deploy.sh --image '$IMAGE_REF'"
+          echo "### Not deployed (RELAY_AUTO_DEPLOY unset)" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$IMAGE_REF\`" >> "$GITHUB_STEP_SUMMARY"
