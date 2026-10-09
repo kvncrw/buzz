@@ -1,0 +1,8 @@
+# Patches merged into `pagoda` on top of upstream block/buzz main, in order.
+# One per line. Forms:
+#   branch:<name>       a branch in the fork (kvncrw/buzz)
+#   upstream-pr:<N>     an open block/buzz pull request (refs/pull/N/head)
+# A patch already contained in upstream main is skipped. A conflict fails the sync.
+branch:fix/nip-oa-owner-link-closed-relay
+branch:feat/agent-self-update-approval
+upstream-pr:5768
