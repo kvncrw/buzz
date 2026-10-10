@@ -280,6 +280,19 @@ jobs:
             echo
             echo "Updater endpoint: ${UPDATER_ENDPOINT}"
             echo
+            echo "## Install / upgrade"
+            echo
+            echo "Already running a pagoda build: the in-app updater offers this one (relaunch Buzz if it does not)."
+            echo "Running stock Buzz: install once, after that the updater follows this fork."
+            echo
+            echo '```bash'
+            echo "mkdir -p ~/Applications && cd ~/Applications"
+            echo "curl -fLo Buzz.AppImage https://github.com/${GITHUB_REPOSITORY}/releases/download/desktop-v${VERSION}/Buzz_${VERSION}_amd64.AppImage"
+            echo "chmod +x Buzz.AppImage && ./Buzz.AppImage"
+            echo '```'
+            echo
+            echo "Debian/Ubuntu: \`sudo dpkg -i Buzz_${VERSION}_amd64.deb\` from the assets below. The relay image is \`ghcr.io/${GITHUB_REPOSITORY}:pagoda\`."
+            echo
             echo "Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           } > release-notes.md
           cat release-notes.md
