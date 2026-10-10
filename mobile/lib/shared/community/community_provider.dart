@@ -134,11 +134,7 @@ Future<void> _deactivateCommunityPushLease(
     canonicalBuzzPushRelayHttpUrl(community.relayUrl),
   );
   final matchingGrant = (await readBuzzPushEndpointGrants())
-      .where(
-        (grant) =>
-            grant.relayOrigin == descriptor.origin &&
-            grant.appProfile == buzzDevPushAppProfile,
-      )
+      .where((grant) => grant.relayOrigin == descriptor.origin)
       .firstOrNull;
   if (matchingGrant == null) {
     throw StateError('No endpoint grant exists for push lease tombstone.');
