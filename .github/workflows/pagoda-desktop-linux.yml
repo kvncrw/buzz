@@ -5,8 +5,10 @@ name: pagoda desktop linux
 # release.yml (same container, deps, pinned appimagetool/runtime, sidecars,
 # fix-appimage.sh), signed with the fork's updater key and pointed at the
 # fork's updater endpoint. Publishes GitHub release desktop-v<version> with
-# the AppImage, its .sig, the .deb and latest.json, so
-# https://github.com/kvncrw/buzz/releases/latest/download/latest.json keeps
+# the AppImage, its .sig, the .deb and latest.json. This release is NOT
+# marked latest: the updater follows a pinned release, moved by hand with
+# `gh release edit <accepted-tag> --latest --repo kvncrw/buzz`. A sync that
+# only republishes docs must not nag installed desktops.
 # installed fork builds current through the in-app updater.
 #
 # Version: <desktop/src-tauri/tauri.conf.json version>-pagoda.<run_number>,
@@ -282,7 +284,7 @@ jobs:
             echo
             echo "## Install / upgrade"
             echo
-            echo "Already running a pagoda build: the in-app updater offers this one (relaunch Buzz if it does not)."
+            echo "Already running a pagoda build: this release does not move the in-app updater. Promote it with \`gh release edit desktop-v\${VERSION} --latest --repo ${GITHUB_REPOSITORY}\` after it is accepted."
             echo "Running stock Buzz: install once, after that the updater follows this fork."
             echo
             echo '```bash'
@@ -311,13 +313,15 @@ jobs:
           TAG="desktop-v${VERSION}"
           files=("$DEB" "$APPIMAGE" "$SIG" latest.json)
           if [[ "$ARCHIVE" != "$APPIMAGE" ]]; then files+=("$ARCHIVE"); fi
-          # Not --prerelease and not --draft on purpose: releases/latest must
-          # resolve to this release for the updater endpoint to work.
+          # --latest false: GitHub's releases/latest stays on the build we
+          # accepted. A newer build is downloadable by tag and does not move
+          # the in-app updater until someone runs:
+          #   gh release edit "$TAG" --latest --repo kvncrw/buzz
           gh release create "$TAG" \
             --target "$SOURCE_SHA" \
             --title "Buzz Desktop ${VERSION} (pagoda, Linux)" \
             --notes-file release-notes.md \
-            --latest \
+            --latest=false \
             "${files[@]}"
           echo "release=https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}" >> "$GITHUB_STEP_SUMMARY"
           echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
