@@ -2,8 +2,10 @@ name: pagoda sync
 
 # Keep the fork tracking upstream: fast-forward `main` to block/buzz main,
 # merge it plus every patch in .pagoda/patches.txt into `pagoda`, push both.
-# If pagoda moved, build the relay image and the Linux desktop release.
-# (Pushes made with GITHUB_TOKEN do not fire `on: push`, hence workflow_call.)
+# The push uses a PAT (PAGODA_PUSH_TOKEN, `repo` + `workflow` scopes):
+# GITHUB_TOKEN cannot push commits that touch .github/workflows/, which every
+# upstream CI change does. A PAT push also fires `on: push`, so the relay image
+# and desktop builds run from their own push triggers instead of workflow_call.
 
 on:
   schedule:
@@ -22,17 +24,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
-      contents: write
-    outputs:
-      changed: ${{ steps.sync.outputs.changed }}
-      pagoda_sha: ${{ steps.sync.outputs.pagoda_sha }}
+      contents: read
     steps:
       - name: Checkout pagoda
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           ref: pagoda
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Configure git identity
         run: |
@@ -48,32 +47,12 @@ jobs:
       - name: Push main and pagoda
         env:
           MAIN_SHA: ${{ steps.sync.outputs.main_sha }}
+          PUSH_TOKEN: ${{ secrets.PAGODA_PUSH_TOKEN }}
         run: |
           set -euo pipefail
+          [[ -n "$PUSH_TOKEN" ]] || { echo "::error::PAGODA_PUSH_TOKEN secret is not set"; exit 1; }
+          helper='!f(){ echo username=x-access-token; echo "password=$PUSH_TOKEN"; }; f'
           # Both are fast-forwards by construction; a non-ff push fails loudly.
-          git push origin "${MAIN_SHA}:refs/heads/main"
-          git push origin pagoda:refs/heads/pagoda
+          git -c credential.helper="$helper" push origin "${MAIN_SHA}:refs/heads/main"
+          git -c credential.helper="$helper" push origin pagoda:refs/heads/pagoda
           echo "main=${MAIN_SHA} pagoda=$(git rev-parse HEAD) changed=${{ steps.sync.outputs.changed }}" >> "$GITHUB_STEP_SUMMARY"
-
-  relay-image:
-    name: Relay image
-    needs: sync
-    if: needs.sync.outputs.changed == 'true'
-    uses: ./.github/workflows/pagoda-relay-image.yml
-    with:
-      ref: ${{ needs.sync.outputs.pagoda_sha }}
-    permissions:
-      contents: read
-      packages: write
-    secrets: inherit
-
-  desktop-linux:
-    name: Desktop Linux
-    needs: sync
-    if: needs.sync.outputs.changed == 'true'
-    uses: ./.github/workflows/pagoda-desktop-linux.yml
-    with:
-      ref: ${{ needs.sync.outputs.pagoda_sha }}
-    permissions:
-      contents: write
-    secrets: inherit
