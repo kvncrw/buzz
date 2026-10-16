@@ -558,7 +558,13 @@ List<TimelineMessage> formatTimeline(
 List<MainTimelineEntry> buildMainTimelineEntries(
   List<TimelineMessage> messages, {
   Map<String, ChannelWindowThreadSummary>? relaySummaries,
+  bool flat = false,
 }) {
+  if (flat) {
+    return [
+      for (final message in messages) MainTimelineEntry(message: message),
+    ];
+  }
   // Index descendant stats by ancestor, so a nested reply updates every summary
   // above it and not only the summary of its direct parent.
   final descendantStats = _buildDescendantStats(messages);

@@ -811,6 +811,24 @@ void main() {
   });
 
   group('buildMainTimelineEntries', () {
+    test(
+      'Me keeps agent replies inline without duplicate thread summaries',
+      () {
+        final messages = formatTimeline([
+          _textMsg(id: 'root', createdAt: 1000),
+          _replyMsg(id: 'answer', parentId: 'root', createdAt: 2000),
+          _textMsg(id: 'followup', createdAt: 3000),
+        ]);
+        final entries = buildMainTimelineEntries(messages, flat: true);
+        expect(entries.map((e) => e.message.id), [
+          'root',
+          'answer',
+          'followup',
+        ]);
+        expect(entries.every((e) => e.summary == null), isTrue);
+      },
+    );
+
     test('returns only root messages', () {
       final messages = formatTimeline([
         _textMsg(id: threadIdA, createdAt: 1000),
