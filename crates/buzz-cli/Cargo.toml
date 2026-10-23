@@ -73,6 +73,9 @@ buzz-persona = { path = "../buzz-persona" }
 # channel-templates.json store for `channels create --template`
 dirs = "6"
 
+# Serialize opt-in publication fencing with harness token retirement.
+fs2 = "0.4.3"
+
 # WebSocket client — ephemeral event publish (kind:20001 is WS-only on the relay)
 buzz-ws-client = { path = "../buzz-ws-client" }
 
