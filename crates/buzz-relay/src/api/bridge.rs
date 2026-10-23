@@ -8932,12 +8932,13 @@ pub(crate) mod postgres_tests {
             ("foreign-tag", Some(false)),
         ] {
             let agent = Keys::generate();
-            buzz_db::relay_members::add_relay_member(
+            let _ = buzz_db::relay_members::add_relay_member(
                 state.db.pool(),
                 tenant.community(),
                 &agent.public_key().to_hex(),
                 "member",
                 None,
+                &state.relay_keypair,
             )
             .await
             .expect("seed direct member");

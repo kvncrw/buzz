@@ -1753,12 +1753,13 @@ mod tests {
 
             for (tagged, challenge) in [(true, "member-tagged"), (false, "member-untagged")] {
                 let agent = Keys::generate();
-                buzz_db::relay_members::add_relay_member(
+                let _ = buzz_db::relay_members::add_relay_member(
                     state.db.pool(),
                     community,
                     &agent.public_key().to_hex(),
                     "member",
                     None,
+                    &state.relay_keypair,
                 )
                 .await
                 .expect("seed direct member");
