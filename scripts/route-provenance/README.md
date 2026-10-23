@@ -132,13 +132,20 @@ node scripts/route-provenance/probe.mjs /absolute/path/to/dist/index.js /absolut
 34. Replace a snapshot during network preflight and require the signing-time
     snapshot. Retired contexts still reject publication. Missing fencing or
     invalid label configuration must not silently publish uninstrumented text.
-35. Replace existing standalone leading labels, preserving the body, code,
-    reply tags, and mentions. Reject empty or label-only input. Check the final
+35. Preserve human-authored leading marker lines byte for byte, including
+    identical, stale, repeated, indented, LF, and CRLF forms. Raw send/edit
+    inputs have no proof that the CLI stamped them. Reject empty input. Check the final
     UTF-8 byte length after stamping, including the 65,536-byte boundary.
 36. Concurrent turns consume only their own snapshots; a new primary turn is
     clean. Multiple verified fallback contributors use one sorted, deduplicated
     label. The trusted producer must supply the cumulative turn snapshot;
     this CLI consumer does not authenticate receipt ingress or reconstruct it.
+37. Rewrite the signed body and recompute its ID while retaining the old
+    signature. Reject both a rewritten labeled body and a stripped label with
+    a primary-shaped intent. Exercise trusted and forged snapshot paths through
+    real CLI readback. Collect every failure in the result artifact.
+38. Require the independently captured sign-time event ID, even for a different
+    event with a valid signature. A missing sign-time ID fails closed.
 
 Run the two negative checks by adding `missing-b2-tool` or `stdin-epipe` as the
 third argument. Both must exit with status 1 and write `passed: false`, with
@@ -228,9 +235,12 @@ must be a regular file, at most 16 KiB; future observations, expired evidence,
 schema errors, and scope mismatches produce `[routing unknown]`. A missing
 snapshot also produces unknown. An invalid or retired context rejects signing.
 
-The formatter replaces standalone leading label lines, including LF and CRLF,
-and preserves inline text and code. Empty or label-only input is rejected
-before upload. Final content, including media links and the label, must fit
+The formatter preserves raw send/edit input byte for byte, including leading
+lines that resemble labels. Input text carries no proof that the CLI stamped
+it, so matching a label's text and position is insufficient to remove it.
+Pass the raw body when editing; copying a previously rendered prefix into the
+input retains it as body text. Empty input is rejected before upload.
+Final content, including media links and the new label, must fit
 65,536 bytes. The fence cannot recall an already signed event; it assumes
 cooperating tools and is not a security boundary against code with the key.
 
@@ -245,7 +255,14 @@ Its three signed readbacks prove automatic stamping before terminal completion
 in the isolated pipeline. The fixture still supplies trusted scope and writes
 the snapshot; authenticated transport and live forwarding are not proved.
 
-The separate delivery fixture compares intended labels with signed readback:
+The separate delivery fixture compares intended labels with signed readback.
+Install locked workspace dependencies first (`pnpm install --frozen-lockfile`).
+The verifier uses the workspace-pinned `@noble/curves` BIP-340 implementation
+to check the signature over the recomputed event ID. Its API also requires
+`signedEventId` captured at signing, independently of readback. A valid
+signature alone cannot establish which event the caller intended to publish.
+It checks the exact expected prefix at offset zero, leaving marker-shaped
+human text in the body intact.
 
 ```bash
 node scripts/route-provenance/delivery-probe.mjs /absolute/path/to/buzz /absolute/artifact/directory
@@ -254,6 +271,9 @@ node scripts/route-provenance/delivery-probe.mjs /absolute/path/to/buzz /absolut
 
 The second command must fail on stripped-label readback. Explicit fixture
 labels do not prove automatic stamping. Neither fixture enables live labels.
+The first command also rejects recomputed IDs with retained signatures, both
+against a trusted snapshot and when a caller supplies a forged snapshot. It
+rejects a different validly signed event and an absent sign-time ID.
 
 ## Isolated ACP lifecycle wiring
 

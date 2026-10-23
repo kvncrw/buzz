@@ -1,18 +1,22 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { schnorr } from "@noble/curves/secp256k1.js";
 
 const fields = ["id", "pubkey", "created_at", "kind", "tags", "content", "sig"];
 const unverified = (reason) => ({ status: "UNVERIFIED", reason });
 
 /**
  * Check delivery against an intent and its trusted signing-time event snapshot.
- * The caller must obtain that snapshot from its signer, never from readback.
- * This fixture verifier does not authenticate route evidence or verify Schnorr.
+ * The caller must obtain that snapshot and signedEventId from its signer,
+ * never from readback. Signature validity does not authenticate route evidence.
  */
 export function verifyDelivery(intent, events) {
-  const { event, expectedContent, requiredPrefix } = intent ?? {};
+  const { event, signedEventId, expectedContent, requiredPrefix } =
+    intent ?? {};
   if (
     !event ||
+    typeof signedEventId !== "string" ||
+    !/^[0-9a-f]{64}$/.test(signedEventId) ||
     typeof expectedContent !== "string" ||
     !expectedContent.trim() ||
     typeof requiredPrefix !== "string" ||
@@ -29,15 +33,15 @@ export function verifyDelivery(intent, events) {
   ) {
     return unverified("invalid-required-prefix");
   }
-  const marker = /^(?:\[routing unknown\]|\[degraded \([^\r\n]*\)\])/;
+  if (event.id !== signedEventId)
+    return unverified("snapshot-differs-from-sign-time-id");
   if (requiredPrefix) {
     if (!expectedContent.startsWith(`${requiredPrefix}\n\n`))
       return unverified("intended-label-missing");
     const body = expectedContent.slice(requiredPrefix.length + 2);
-    if (!body.trim() || marker.test(body.trimStart()))
-      return unverified("empty-body-or-duplicate-label");
-  } else if (marker.test(expectedContent.trimStart())) {
-    return unverified("unexpected-primary-label");
+    // Remove only the exact CLI prefix at offset zero for the body check.
+    // Identical marker-shaped text inside the intended body is human content.
+    if (!body.trim()) return unverified("empty-body");
   }
   if (event.content !== expectedContent)
     return unverified("signed-content-differs-from-intent");
@@ -67,7 +71,19 @@ export function verifyDelivery(intent, events) {
   ]);
   if (createHash("sha256").update(canonical).digest("hex") !== event.id)
     return unverified("invalid-snapshot-id");
-  const matching = events.filter((item) => item?.id === event.id);
+  try {
+    if (
+      !schnorr.verify(
+        Buffer.from(event.sig, "hex"),
+        Buffer.from(event.id, "hex"),
+        Buffer.from(event.pubkey, "hex"),
+      )
+    )
+      return unverified("invalid-snapshot-signature");
+  } catch {
+    return unverified("invalid-snapshot-signature");
+  }
+  const matching = events.filter((item) => item?.id === signedEventId);
   if (matching.length !== 1) return unverified("event-absent-or-ambiguous");
   for (const field of fields) {
     if (!isDeepStrictEqual(matching[0][field], event[field]))

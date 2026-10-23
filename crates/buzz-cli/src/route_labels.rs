@@ -37,27 +37,9 @@ fn enabled() -> Result<bool, CliError> {
     }
 }
 
-// Only standalone leading marker lines are reserved. Inline discussion
-// and markers inside code blocks remain part of the original body.
-fn without_labels(mut content: &str) -> &str {
-    loop {
-        let candidate = content.trim_start();
-        let (line, rest) = candidate.split_once('\n').unwrap_or((candidate, ""));
-        let line = line.trim_end();
-        let degraded = line
-            .strip_prefix("[degraded (")
-            .and_then(|value| value.strip_suffix(")]"))
-            .is_some_and(|value| !value.contains(['\r', '\n']));
-        if line != UNKNOWN && !degraded {
-            return content;
-        }
-        content = rest.trim_start_matches(['\r', '\n']);
-    }
-}
-
 /// Reject empty source content before attachments or a label can conceal it.
 pub(crate) fn validate_input(content: &str) -> Result<(), CliError> {
-    if enabled()? && without_labels(content).trim().is_empty() {
+    if enabled()? && content.trim().is_empty() {
         return Err(CliError::Usage(
             "route-labeled content must have a body".into(),
         ));
@@ -116,7 +98,9 @@ pub(crate) fn stamp(content: &str, fence: Option<&PublicationFence>) -> Result<S
     let fence = fence.ok_or_else(|| {
         CliError::Other("route labels require a valid publication context".into())
     })?;
-    let body = without_labels(content);
+    // Raw send/edit input has no stamp provenance. Even an identical leading
+    // marker can be human-authored, so never remove input based on its shape.
+    let body = content;
     if body.trim().is_empty() {
         return Err(CliError::Usage(
             "route-labeled content must have a body".into(),
