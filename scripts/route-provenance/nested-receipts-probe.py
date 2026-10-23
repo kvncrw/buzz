@@ -564,6 +564,8 @@ def main():
         Path(__file__).with_name("publication-lifecycle.mjs"),
         Path(__file__).with_name("delivery-readback.mjs"),
         Path("target/debug/buzz"),
+        Path("package.json"),
+        Path("pnpm-lock.yaml"),
         Path("crates/buzz-cli/src/route_labels.rs"),
         Path("crates/buzz-cli/src/publication_fence.rs"),
         Path("crates/buzz-cli/src/commands/messages.rs"),

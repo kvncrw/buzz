@@ -24,6 +24,8 @@ const hash = (file) =>
   createHash("sha256").update(readFileSync(file)).digest("hex");
 const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 const sourceFiles = [
+  "package.json",
+  "pnpm-lock.yaml",
   "Cargo.lock",
   "crates/buzz-cli/Cargo.toml",
   "crates/buzz-cli/src/lib.rs",
@@ -203,12 +205,12 @@ async function exercise(operation, scenario) {
     prefix = degraded;
   if (["mention", "attachment"].includes(scenario)) prefix = degraded;
   if (scenario === "mention") input = `@Fixture Member ${body}`;
-  if (scenario === "removed-label-mention") {
+  if (scenario === "human-label-mention") {
     input = `[degraded (@Fixture Member)]\n\n${body}`;
     prefix = degraded;
   }
   if (
-    ["primary", "primary-removes-prefix", "concurrent-primary"].includes(
+    ["primary", "primary-keeps-input-prefix", "concurrent-primary"].includes(
       scenario,
     )
   ) {
@@ -238,7 +240,7 @@ async function exercise(operation, scenario) {
     input = `${degraded}\n\n${body}`;
     prefix = "";
   }
-  if (["double-prefix", "primary-removes-prefix"].includes(scenario))
+  if (["double-prefix", "primary-keeps-input-prefix"].includes(scenario))
     input = `${degraded}\n\n${unknown}\n\n${body}`;
   if (scenario === "stale-prefix") input = `  [degraded (old-leaf)]\n\n${body}`;
   if (scenario === "single-newline-prefix") {
@@ -255,7 +257,7 @@ async function exercise(operation, scenario) {
   }
   if (scenario === "label-only") {
     input = degraded;
-    rejected = true;
+    prefix = degraded;
   }
   if (scenario === "at-limit")
     input = "x".repeat(65536 - Buffer.byteLength(`${prefix}\n\n`));
@@ -370,17 +372,6 @@ async function exercise(operation, scenario) {
     );
     assert(event);
     let expectedBody = input;
-    if (
-      [
-        "double-prefix",
-        "primary-removes-prefix",
-        "stale-prefix",
-        "single-newline-prefix",
-        "crlf-prefix",
-        "removed-label-mention",
-      ].includes(scenario)
-    )
-      expectedBody = body;
     if (scenario === "attachment")
       expectedBody += `\n![image](${common.BUZZ_RELAY_URL}/fixture.png)`;
     const expected = prefix ? `${prefix}\n\n${expectedBody}` : expectedBody;
@@ -403,10 +394,10 @@ async function exercise(operation, scenario) {
       );
       assert.deepEqual(result.output.mention_pubkeys, [context.agent_pubkey]);
     }
-    if (scenario === "removed-label-mention") {
+    if (scenario === "human-label-mention") {
       assert(
         !event.tags.some((tag) => tag[0] === "p"),
-        "Removed label produced a notification",
+        "Bracketed human text changed existing mention behavior",
       );
       assert.deepEqual(result.output.mention_pubkeys, []);
     }
@@ -424,15 +415,18 @@ async function exercise(operation, scenario) {
       "--limit",
       "200",
     ]);
-    // Disabled mode deliberately preserves manual labels, so it is checked above.
-    if (scenario !== "disabled-keeps-prefix")
-      assert.equal(
-        verifyDelivery(
-          { event, expectedContent: expected, requiredPrefix: prefix },
-          readback.output,
-        ).status,
-        "VERIFIED",
-      );
+    assert.equal(
+      verifyDelivery(
+        {
+          event,
+          signedEventId: event.id,
+          expectedContent: expected,
+          requiredPrefix: prefix,
+        },
+        readback.output,
+      ).status,
+      "VERIFIED",
+    );
   }
   report.assertions.push({
     operation,
@@ -467,6 +461,7 @@ try {
   for (const operation of ["send", "edit"]) {
     for (const scenario of [
       "degraded",
+      "double-prefix",
       "primary",
       "unknown",
       "multiple",
@@ -494,11 +489,10 @@ try {
       "primary-conflict",
       "too-many",
       "unknown-with-fallback",
-      "double-prefix",
       "single-newline-prefix",
       "crlf-prefix",
       "stale-prefix",
-      "primary-removes-prefix",
+      "primary-keeps-input-prefix",
       "empty",
       "label-only",
       "at-limit",
@@ -514,7 +508,7 @@ try {
   }
   await exercise("forum", "degraded");
   await exercise("send", "mention");
-  await exercise("send", "removed-label-mention");
+  await exercise("send", "human-label-mention");
   await exercise("send", "attachment");
   await Promise.all([
     exercise("send", "concurrent-degraded"),
