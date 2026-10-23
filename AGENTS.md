@@ -192,7 +192,7 @@ Extract `channel` and `id` from the URL query parameters. The optional
 `thread` parameter (root event ID) can be ignored — `messages thread` resolves
 the full thread from the event ID alone.
 
-All reads return sig-stripped JSON arrays; all writes return
+Event reads in JSON format preserve signed fields, including `sig`; all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
 

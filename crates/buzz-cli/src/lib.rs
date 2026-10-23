@@ -3,6 +3,8 @@ mod client;
 mod commands;
 mod error;
 mod links;
+mod publication_fence;
+mod route_labels;
 mod validate;
 
 use clap::{Parser, Subcommand};

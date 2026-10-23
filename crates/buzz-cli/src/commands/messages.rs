@@ -581,6 +581,7 @@ pub async fn cmd_send_message(
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
+    crate::route_labels::validate_input(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
@@ -643,6 +644,14 @@ pub async fn cmd_send_message(
 
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
+    let publication_fence = crate::publication_fence::acquire(
+        client.relay_url(),
+        &client.keys().public_key().to_hex(),
+        &channel_uuid.to_string(),
+    )?;
+    let final_content = crate::route_labels::stamp(&final_content, publication_fence.as_ref())?;
+    validate_content_size(&final_content)?;
+
     let builder = match p.kind {
         Some(45001) => {
             buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
@@ -678,6 +687,7 @@ pub async fn cmd_send_message(
     };
 
     let event = client.sign_event(builder)?;
+    drop(publication_fence);
     let emitted_mentions = event_mention_pubkeys(&event);
     let resp = client.submit_event(event).await?;
     let mut output: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
@@ -819,15 +829,23 @@ pub async fn cmd_edit_message(
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
     validate_content_size(content)?;
+    crate::route_labels::validate_input(content)?;
 
     // Resolve channel_id from the event's h-tag
     let channel_uuid = resolve_channel_id(client, event_id).await?;
     let target_eid = parse_event_id(event_id)?;
 
-    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, content)
+    let publication_fence = crate::publication_fence::acquire(
+        client.relay_url(),
+        &client.keys().public_key().to_hex(),
+        &channel_uuid.to_string(),
+    )?;
+    let content = crate::route_labels::stamp(content, publication_fence.as_ref())?;
+    validate_content_size(&content)?;
+    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, &content)
         .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
-
     let event = client.sign_event(builder)?;
+    drop(publication_fence);
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));

@@ -1303,7 +1303,7 @@ fn to_ws_url(http_url: &str) -> String {
 }
 
 /// Normalize raw event JSON array into consistent shape.
-/// Each event becomes: {id, pubkey, kind, content, created_at, tags}
+/// Preserve the signature so callers can verify the complete signed event.
 pub fn normalize_events(events: &[serde_json::Value]) -> String {
     let normalized: Vec<serde_json::Value> = events
         .iter()
@@ -1315,6 +1315,7 @@ pub fn normalize_events(events: &[serde_json::Value]) -> String {
                 "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
                 "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
                 "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
+                "sig": e.get("sig").and_then(|v| v.as_str()).unwrap_or(""),
             })
         })
         .collect();
