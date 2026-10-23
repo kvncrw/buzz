@@ -648,6 +648,20 @@ pub async fn cmd_send_message(
 
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
+    // Complete network enrichment before locking the turn for signing. Otherwise
+    // cancellation cannot retire the token while the palette request is pending.
+    let emoji_tags = if matches!(p.kind, None | Some(9)) && final_content.contains(':') {
+        match crate::commands::emoji::resolve_emoji_tags_for_content(client, &final_content).await {
+            Ok(tags) => tags,
+            Err(e) => {
+                eprintln!("warning: emoji palette fetch failed ({e}); sending without emoji tags");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     let publication_fence = crate::publication_fence::acquire(
         client.relay_url(),
         &client.keys().public_key().to_hex(),
@@ -674,43 +688,16 @@ pub async fn cmd_send_message(
             )
             .map_err(|e| CliError::Other(format!("build_forum_comment failed: {e}")))?
         }
-        None | Some(9) => {
-            // Scan final_content for `:shortcode:` patterns and attach NIP-30
-            // emoji tags for any that resolve in the workspace palette.
-            // Palette resolution is scoped to kind 9: forum builders (45001,
-            // 45003) do not accept emoji_tags, so resolving early would pay
-            // the relay query and immediately discard the result.
-            // The fetch is skipped entirely when content has no `:`, keeping
-            // plain sends at zero extra RTTs.  Palette resolution is
-            // decorative enrichment — a fetch or parse failure must not block
-            // delivery of a valid message; on error, degrade to no emoji tags
-            // and log a diagnostic to stderr.
-            let emoji_tags = if final_content.contains(':') {
-                match crate::commands::emoji::resolve_emoji_tags_for_content(client, &final_content)
-                    .await
-                {
-                    Ok(tags) => tags,
-                    Err(e) => {
-                        eprintln!(
-                            "warning: emoji palette fetch failed ({e}); sending without emoji tags"
-                        );
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            };
-            buzz_sdk::build_message(
-                channel_uuid,
-                &final_content,
-                thread_ref.as_ref(),
-                &mention_refs,
-                p.broadcast,
-                &media_tags,
-                &emoji_tags,
-            )
-            .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?
-        }
+        None | Some(9) => buzz_sdk::build_message(
+            channel_uuid,
+            &final_content,
+            thread_ref.as_ref(),
+            &mention_refs,
+            p.broadcast,
+            &media_tags,
+            &emoji_tags,
+        )
+        .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?,
         Some(k) => {
             return Err(CliError::Usage(format!(
                 "--kind {k} is not supported (use 9, 45001, or 45003)"
