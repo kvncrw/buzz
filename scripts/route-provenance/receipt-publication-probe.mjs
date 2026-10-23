@@ -93,6 +93,7 @@ try {
     const result = verifyDelivery(
       {
         event,
+        signedEventId: event.id,
         expectedContent: content,
         requiredPrefix: prefix,
       },

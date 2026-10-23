@@ -23,6 +23,9 @@ importers:
       '@biomejs/biome':
         specifier: ^2.4.6
         version: 2.4.16
+      '@noble/curves':
+        specifier: 2.0.1
+        version: 2.0.1
 
   admin-web:
     dependencies:

@@ -33,6 +33,8 @@ const report = {
       fileURLToPath(import.meta.url),
       path.join(directory, "README.md"),
       "crates/buzz-cli/src/client.rs",
+      "package.json",
+      "pnpm-lock.yaml",
     ].map((file) => [file, hash(file)]),
   ),
   assertions: [],
@@ -121,7 +123,8 @@ try {
     BUZZ_PRIVATE_KEY: randomBytes(32).toString("hex"),
   };
   const channel = randomUUID();
-  const body = "Synthetic delivery fixture.\n\n```text\nunchanged body\n```";
+  const baseBody =
+    "Synthetic delivery fixture.\n\n```text\nunchanged body\n```";
   const readback = () =>
     cli([
       "messages",
@@ -153,7 +156,6 @@ try {
       actual: result.status,
       reason: result.reason,
     });
-    assert.equal(result.status, expected, name);
   };
   let parent;
   for (const [operation, prefix] of [
@@ -163,6 +165,7 @@ try {
     ["edit", "[degraded (synthetic-leaf)]"],
     ["edit", "[routing unknown]"],
   ]) {
+    const body = `${baseBody}\n${operation}:${prefix || "primary"}`;
     const content = prefix ? `${prefix}\n\n${body}` : body;
     const args =
       operation === "send"
@@ -185,9 +188,81 @@ try {
     if (parent)
       assert(event.tags.some((tag) => tag[0] === "e" && tag[1] === parent));
     parent ??= event.id;
-    const intent = { event, expectedContent: content, requiredPrefix: prefix };
+    const intent = {
+      event: structuredClone(event),
+      signedEventId: event.id,
+      expectedContent: content,
+      requiredPrefix: prefix,
+    };
     const name = `${operation}:${prefix || "primary"}`;
     await check(`${name}:exact`, intent, "VERIFIED");
+    const rehash = (item) => ({
+      ...item,
+      id: createHash("sha256")
+        .update(
+          JSON.stringify([
+            0,
+            item.pubkey,
+            item.created_at,
+            item.kind,
+            item.tags,
+            item.content,
+          ]),
+        )
+        .digest("hex"),
+    });
+    for (const [attack, forgedContent, requiredPrefix] of [
+      ["rewritten-body", `${content}\nforged`, prefix],
+      ...(prefix ? [["stripped-primary", body, ""]] : []),
+    ]) {
+      const forged = rehash({ ...event, content: forgedContent });
+      const mutation = (events) =>
+        events.map((item) => (item.id === event.id ? forged : item));
+      await check(
+        `${name}:${attack}:trusted-snapshot`,
+        intent,
+        "UNVERIFIED",
+        mutation,
+      );
+      // Even a caller that mistakenly accepts the forged snapshot must not
+      // accept the retained signature as valid for the recomputed ID.
+      await check(
+        `${name}:${attack}:forged-snapshot`,
+        {
+          event: forged,
+          signedEventId: forged.id,
+          expectedContent: forgedContent,
+          requiredPrefix,
+        },
+        "UNVERIFIED",
+        mutation,
+      );
+    }
+    const replacement = await cli([
+      "messages",
+      "send",
+      "--channel",
+      channel,
+      "--content",
+      `${content}\nvalid replacement`,
+    ]);
+    const replacementEvent = report.events.find(
+      (item) => item.id === replacement.event_id,
+    );
+    await check(
+      `${name}:valid-signature-wrong-sign-time-id`,
+      {
+        ...intent,
+        event: replacementEvent,
+        expectedContent: replacementEvent.content,
+      },
+      "UNVERIFIED",
+    );
+    await check(
+      `${name}:missing-sign-time-id`,
+      { ...intent, signedEventId: undefined },
+      "UNVERIFIED",
+    );
     if (prefix) {
       await check(`${name}:stripped-label`, intent, "UNVERIFIED", (events) =>
         events.map((item) =>
@@ -248,6 +323,14 @@ try {
   assert.equal(report.sourceCommitAtFinish, report.sourceCommit);
   for (const [file, digest] of Object.entries(report.sourceHashes))
     assert.equal(hash(file), digest, `Source changed: ${file}`);
+  const failures = report.assertions.filter(
+    (item) => item.actual !== item.expected,
+  );
+  assert.equal(
+    failures.length,
+    0,
+    `Failed assertions: ${failures.map((item) => item.name).join(", ")}`,
+  );
   report.passed = true;
 } catch (error) {
   report.error = error.message;
