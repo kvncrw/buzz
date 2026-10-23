@@ -41,6 +41,7 @@ report.sourceHashes = Object.fromEntries(
   ].map((file) => [file, hash(file)]),
 );
 let queryBarrier;
+let emojiBarrier;
 let serverError;
 const server = http.createServer(async (request, response) => {
   try {
@@ -57,6 +58,11 @@ const server = http.createServer(async (request, response) => {
         JSON.stringify({ event_id: body.id, accepted: true, message: "" }),
       );
     } else if (request.url === "/query") {
+      if (emojiBarrier && body.some((filter) => filter.kinds?.includes(30030))) {
+        const barrier = emojiBarrier;
+        emojiBarrier = undefined;
+        await barrier();
+      }
       if (queryBarrier) {
         const barrier = queryBarrier;
         queryBarrier = undefined;
@@ -101,7 +107,7 @@ const retire = async (directory, record) => {
       directory,
       JSON.stringify(record),
     ],
-    { env: { PATH: process.env.PATH }, timeout: 5000 },
+    { env: { PATH: process.env.PATH }, timeout: 1000 },
   );
 };
 try {
@@ -146,6 +152,7 @@ try {
       "context-fifo",
       "lock-fifo",
       "busy-lock",
+      ...(operation === "send" ? ["retired-during-emoji-preflight"] : []),
     ]) {
       const directory = path.join(run, `${operation}-${scenario}`);
       mkdirSync(directory, { mode: 0o700 });
@@ -177,7 +184,7 @@ try {
         );
       let retiredDuringPreflight = false;
       if (scenario.endsWith("during-preflight")) {
-        queryBarrier = async () => {
+        const barrier = async () => {
           await retire(directory, {
             ...record,
             ...(scenario.startsWith("superseded")
@@ -186,6 +193,8 @@ try {
           });
           retiredDuringPreflight = true;
         };
+        if (scenario === "retired-during-emoji-preflight") emojiBarrier = barrier;
+        else queryBarrier = barrier;
       }
       const before = report.events.length;
       const args =
@@ -198,7 +207,7 @@ try {
               "--reply-to",
               parent.output.event_id,
               "--content",
-              `synthetic ${scenario}`,
+              `synthetic ${scenario}${scenario === "retired-during-emoji-preflight" ? " :wave:" : ""}`,
             ]
           : [
               "messages",
@@ -275,6 +284,7 @@ try {
         `${operation}:${scenario}: wrong exit status`,
       );
       queryBarrier = undefined;
+      emojiBarrier = undefined;
     }
   }
   report.sourceCommitAtFinish = execFileSync("git", ["rev-parse", "HEAD"], {
