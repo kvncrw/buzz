@@ -4,6 +4,8 @@ mod commands;
 mod error;
 mod help_tree;
 mod links;
+mod publication_fence;
+mod route_labels;
 mod validate;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
