@@ -186,7 +186,7 @@ try {
           { mode: 0o600 },
         );
       let retiredDuringPreflight = false;
-      if (scenario.endsWith("during-preflight")) {
+      if (scenario.endsWith("preflight")) {
         const barrier = async () => {
           await retire(directory, {
             ...record,
@@ -267,7 +267,7 @@ try {
         }
       }
       const submissions = report.events.length - before;
-      if (scenario.endsWith("during-preflight"))
+      if (scenario.endsWith("preflight"))
         assert(retiredDuringPreflight, "Race barrier was not exercised");
       const accepted = scenario === "active";
       report.assertions.push({
