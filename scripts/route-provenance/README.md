@@ -146,6 +146,10 @@ node scripts/route-provenance/probe.mjs /absolute/path/to/dist/index.js /absolut
     real CLI readback. Collect every failure in the result artifact.
 38. Require the independently captured sign-time event ID, even for a different
     event with a valid signature. A missing sign-time ID fails closed.
+39. Retire the token while the custom emoji palette query is held. Retirement
+    must acquire the exclusive lock before the query returns, and the CLI must
+    then reject signing. A lock timeout fails this scenario; it cannot stand
+    in for successful retirement. No network request may hold the signing lock.
 
 Run the two negative checks by adding `missing-b2-tool` or `stdin-epipe` as the
 third argument. Both must exit with status 1 and write `passed: false`, with
