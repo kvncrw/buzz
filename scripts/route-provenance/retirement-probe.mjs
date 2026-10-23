@@ -58,7 +58,10 @@ const server = http.createServer(async (request, response) => {
         JSON.stringify({ event_id: body.id, accepted: true, message: "" }),
       );
     } else if (request.url === "/query") {
-      if (emojiBarrier && body.some((filter) => filter.kinds?.includes(30030))) {
+      if (
+        emojiBarrier &&
+        body.some((filter) => filter.kinds?.includes(30030))
+      ) {
         const barrier = emojiBarrier;
         emojiBarrier = undefined;
         await barrier();
@@ -193,7 +196,8 @@ try {
           });
           retiredDuringPreflight = true;
         };
-        if (scenario === "retired-during-emoji-preflight") emojiBarrier = barrier;
+        if (scenario === "retired-during-emoji-preflight")
+          emojiBarrier = barrier;
         else queryBarrier = barrier;
       }
       const before = report.events.length;
