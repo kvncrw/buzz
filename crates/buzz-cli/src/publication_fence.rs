@@ -57,16 +57,16 @@ pub(crate) fn open_regular(path: &Path) -> Result<File, CliError> {
 
 /// Acquire an optional turn fence and keep its file alive until signing ends.
 ///
-/// With both variables absent, ordinary human and uninstrumented clients keep
-/// their existing behavior. Partial configuration fails closed. A busy lock
+/// With both variables absent or empty, ordinary clients and channel-less
+/// heartbeats keep their existing behavior. Partial configuration fails closed. A busy lock
 /// also fails closed rather than blocking cancellation behind network work.
 pub(crate) fn acquire(
     relay: &str,
     agent_pubkey: &str,
     channel_id: &str,
 ) -> Result<Option<PublicationFence>, CliError> {
-    let directory = std::env::var_os("BUZZ_PUBLICATION_CONTEXT");
-    let token = std::env::var_os("BUZZ_PUBLICATION_TOKEN");
+    let directory = std::env::var_os("BUZZ_PUBLICATION_CONTEXT").filter(|value| !value.is_empty());
+    let token = std::env::var_os("BUZZ_PUBLICATION_TOKEN").filter(|value| !value.is_empty());
     let (directory, token) = match (directory, token) {
         (None, None) => return Ok(None),
         (Some(directory), Some(token)) => (PathBuf::from(directory), token),
@@ -128,4 +128,60 @@ pub(crate) fn acquire(
         directory,
         context,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn publication_empty_environment_is_unconfigured_but_partial_is_rejected() {
+        const CASE: &str = "BUZZ_TEST_PUBLICATION_ENV_CASE";
+        if let Ok(case) = std::env::var(CASE) {
+            let result = super::acquire("https://relay.invalid", "agent", "channel");
+            if case == "unconfigured" {
+                assert!(
+                    matches!(result, Ok(None)),
+                    "empty credentials must be absent"
+                );
+            } else {
+                assert!(result.is_err(), "partial credentials must fail closed");
+            }
+            return;
+        }
+        // Each case gets its own process so parallel tests cannot see these values.
+        for (directory, token, expected) in [
+            (None, None, "unconfigured"),
+            (Some(""), Some(""), "unconfigured"),
+            (Some(""), None, "unconfigured"),
+            (None, Some(""), "unconfigured"),
+            (Some("/missing"), Some(""), "rejected"),
+            (Some(""), Some("token"), "rejected"),
+            (Some("/missing"), None, "rejected"),
+            (None, Some("token"), "rejected"),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "publication_fence::tests::publication_empty_environment_is_unconfigured_but_partial_is_rejected",
+                    "--nocapture",
+                ])
+                .env(CASE, expected)
+                .env("BUZZ_ROUTE_LABELS", "0")
+                .env_remove("BUZZ_PUBLICATION_CONTEXT")
+                .env_remove("BUZZ_PUBLICATION_TOKEN");
+            if let Some(value) = directory {
+                command.env("BUZZ_PUBLICATION_CONTEXT", value);
+            }
+            if let Some(value) = token {
+                command.env("BUZZ_PUBLICATION_TOKEN", value);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "context={directory:?}, token={token:?}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }

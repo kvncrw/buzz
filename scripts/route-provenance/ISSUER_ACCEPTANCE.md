@@ -16,7 +16,8 @@ CLI displays `[routing unknown]`.
    the model receives an authorized channel prompt. Preserve the configured
    seven-day ceiling (604,800 seconds). Heartbeats have no channel: skip
    issuance and explicitly disable labels and clear credentials in their
-   native and MCP environments, including session reuse.
+   native and MCP environments, including session reuse. The CLI treats empty
+   credentials as absent, while partial configuration still fails closed.
 3. Each turn gets a new directory and token. Native Claude tools and supplied
    MCP tools must receive the same context. Other session parameters survive.
 4. Reusing a session refreshes its environment through the installed adapter's
@@ -30,7 +31,9 @@ CLI displays `[routing unknown]`.
    the issuer lease and report failure; do not claim orderly retirement. Process
    death cannot recall an event already admitted to the signing critical section.
    A signer drain uses `PublicationDrainTimeout`, never a protocol error.
-   Preserve completed prompt outcomes and report retirement failure separately.
+   Preserve completed prompt and cancellation outcomes and report retirement
+   failure separately. An acknowledged Stop drops its batch without `turn_error`;
+   Steer and Interrupt preserve cancelled work without retry penalties.
    Send Stop after revocation, concurrently with signer draining, so the adapter
    retains its five-second control grace and timeout classification.
 6. Two concurrent seats and two channels must not share contexts. A new turn
@@ -39,7 +42,8 @@ CLI displays `[routing unknown]`.
    says active. Version-one fixture compatibility does not prove crash fencing.
 8. Run the actual harness/CLI workflow and the full ACP and CLI package suites.
    Save source state, binary hashes, assertions, and a negative-control result.
-   Run full repository CI before requesting Grok's review and Fable's merge.
+   Run full repository CI in parallel with Grok's review. Fable's merge requires
+   both a green CI verdict and Grok's approval on the same commit.
 9. Session creation and resume must omit parameters from `acp_write` observer
    frames while delivering the complete environment to the adapter.
 

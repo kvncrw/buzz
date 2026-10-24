@@ -208,18 +208,17 @@ impl AcpClient {
         );
     }
 
-    pub(super) fn finish_publication_cancel<T>(
+    pub(super) fn finish_publication_cancel(
         &self,
-        cancelled: Result<T, AcpError>,
+        cancelled: Result<super::StopReason, AcpError>,
         retired: Result<(), AcpError>,
-    ) -> Result<T, AcpError> {
+    ) -> Result<super::StopReason, AcpError> {
         if let Err(error) = &retired {
             self.report_retirement_failure(error);
         }
-        // Preserve adapter failures, especially its bounded cancellation deadline.
-        let result = cancelled?;
-        retired?;
-        Ok(result)
+        // A completed stop must stay cancelled work, without retry penalties.
+        // Adapter failures, including the bounded cancellation deadline, also survive.
+        cancelled
     }
 
     pub(crate) async fn refresh_publication(

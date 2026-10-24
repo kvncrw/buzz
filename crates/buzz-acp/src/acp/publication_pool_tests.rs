@@ -1,6 +1,6 @@
 //! Exercise the real pool and CLI; only the ACP peer and relay are synthetic.
 use super::*;
-use crate::acp::{EnvVar, McpServer};
+use crate::acp::{EnvVar, McpServer, StopReason};
 use crate::pool::{
     run_prompt_task, ChannelInfoResolver, OwnedAgent, PromptContext, PromptOutcome, SessionState,
 };
@@ -12,12 +12,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PEER: &str = r#"
 import fcntl,hashlib,json,os,pathlib,subprocess,sys
-root=pathlib.Path(sys.argv[1]); sessions={}; sequence=0
+root=pathlib.Path(sys.argv[1]); sessions={}; sequence=0; pending=None
 signers=[]
 def record(value):
  with (root/'wire.jsonl').open('a') as f: f.write(json.dumps(value)+'\n')
 for line in sys.stdin:
  m=json.loads(line); p=m.get('params',{}); method=m.get('method')
+ if method=='session/cancel' and pending is not None:
+  print(json.dumps({'jsonrpc':'2.0','id':pending,'result':{'stopReason':'cancelled'}}),flush=True)
+  pending=None; continue
  if 'id' not in m: continue
  if method in ('session/new','session/resume'):
   sequence+=1
@@ -29,10 +32,12 @@ for line in sys.stdin:
   sessions[sid]=p; result={'sessionId':sid}
  elif method=='session/prompt':
   s=sessions[p['sessionId']]; native=s['_meta']['claudeCode']['options']['env']
-  context=json.loads((pathlib.Path(native['BUZZ_PUBLICATION_CONTEXT'])/'context.json').read_text())
-  if (root/'hold-signer').exists():
+  context=({'channel_id':os.environ['BUZZ_TEST_PUBLICATION_CHANNEL']} if native['BUZZ_ROUTE_LABELS']=='0' else json.loads((pathlib.Path(native['BUZZ_PUBLICATION_CONTEXT'])/'context.json').read_text()))
+  if (root/'hold-signer').exists() or (root/'hold-cancel').exists():
    signer=open(pathlib.Path(native['BUZZ_PUBLICATION_CONTEXT'])/'lock')
    fcntl.flock(signer,fcntl.LOCK_SH); signers.append(signer)
+   if (root/'hold-cancel').exists():
+    pending=m['id']; (root/'prompt-ready').write_text('ready'); continue
    print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':{'stopReason':'end_turn'}}),flush=True); continue
   for kind,env in [('native',native),('mcp',{e['name']:e['value'] for e in s['mcpServers'][0]['env']})]:
    combined=dict(os.environ,**env); combined.pop('BUZZ_AUTH_TAG',None)
@@ -123,6 +128,7 @@ async fn seat(
         ("BUZZ_ROUTE_LABELS".into(), "1".into()),
         ("BUZZ_TEST_PUBLICATION_CLI".into(), cli.into()),
         ("BUZZ_RELAY_URL".into(), endpoint.into()),
+        ("BUZZ_TEST_PUBLICATION_CHANNEL".into(), channel.to_string()),
         (
             "BUZZ_PRIVATE_KEY".into(),
             ctx.agent_keys.secret_key().to_secret_hex(),
@@ -178,6 +184,16 @@ async fn turn(
     channel: Uuid,
     turn: &str,
 ) -> crate::pool::PromptResult {
+    turn_with_control(agent, ctx, channel, turn, None).await
+}
+
+async fn turn_with_control(
+    agent: OwnedAgent,
+    ctx: Arc<PromptContext>,
+    channel: Uuid,
+    turn: &str,
+    control: Option<tokio::sync::oneshot::Receiver<crate::pool::ControlSignal>>,
+) -> crate::pool::PromptResult {
     let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "fixture request")
         .sign_with_keys(&nostr::Keys::generate())
         .unwrap();
@@ -204,7 +220,7 @@ async fn turn(
             None,
             ctx,
             sender,
-            None,
+            control,
             turn.into(),
             Default::default(),
         ),
@@ -212,6 +228,203 @@ async fn turn(
     .await
     .unwrap();
     receiver.recv().await.unwrap()
+}
+
+#[tokio::test]
+async fn publication_pool_completed_cancel_preserves_control_and_queue() {
+    use crate::pool::{AgentPool, ControlSignal, TaskMeta};
+    use crate::queue::{CancelReason, EventQueue, QueuedEvent};
+    use std::collections::HashSet;
+
+    for (signal, reason) in [
+        (ControlSignal::Cancel, None),
+        (ControlSignal::Steer, Some(CancelReason::Steer)),
+        (ControlSignal::Interrupt, Some(CancelReason::Interrupt)),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("hold-cancel"), "1").unwrap();
+        let (endpoint, _, server) = relay().await;
+        let channel = Uuid::new_v4();
+        let (mut agent, mut ctx) = seat(root.path(), "unused", &endpoint, channel).await;
+        Arc::get_mut(&mut ctx).unwrap().initial_message = None;
+        Arc::get_mut(&mut ctx).unwrap().dedup_mode = crate::config::DedupMode::Queue;
+        let observer = crate::observer::ObserverHandle::in_process();
+        agent.acp.set_observer(Some(observer.clone()), 0);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(turn_with_control(
+            agent,
+            ctx,
+            channel,
+            "control-cancel",
+            Some(rx),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !root.path().join("prompt-ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tx.send(signal).unwrap();
+        let result = task.await.unwrap();
+        assert!(
+            matches!(result.outcome, PromptOutcome::Cancelled),
+            "acknowledged control must remain Cancelled"
+        );
+        assert_eq!(result.batch.is_some(), reason.is_some());
+        if let Some(batch) = &result.batch {
+            assert_eq!(batch.cancel_reason, reason);
+            assert_eq!(batch.events.len(), 1);
+        }
+        assert!(observer
+            .snapshot()
+            .iter()
+            .any(|event| event.kind == "publication_retirement_failed"));
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel),
+                scope: None,
+                turn_id: result.turn_id.clone(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(crate::config::DedupMode::Queue);
+        let next = nostr::EventBuilder::new(nostr::Kind::Custom(9), "next request")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        queue.push(QueuedEvent {
+            edit: None,
+            channel_id: channel,
+            scope: SessionScope::Conversation {
+                channel_id: channel,
+            },
+            event: next.clone(),
+            received_at: std::time::Instant::now(),
+            prompt_tag: "fixture".into(),
+        });
+        let mut history = vec![crate::SlotCircuit {
+            crash_times: vec![],
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _) = tokio::sync::mpsc::channel(8);
+        let mut respawns = tokio::task::JoinSet::new();
+        crate::handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &crate::build_mcp_servers_tests::test_config(),
+            result,
+            &mut false,
+            &HashSet::new(),
+            &mut history,
+            &respawn_tx,
+            &mut respawns,
+            Some(observer.clone()),
+            None,
+            &mut tokio::time::Instant::now(),
+        );
+        assert_eq!(pool.live_count(), 1);
+        assert!(respawns.is_empty());
+        assert!(!observer
+            .snapshot()
+            .iter()
+            .any(|event| event.kind == "turn_error"));
+        let batch = queue
+            .flush_next()
+            .expect("next request must be immediately available without retry delay");
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0].event.id, next.id);
+        assert_eq!(batch.cancel_reason, reason);
+        assert_eq!(batch.cancelled_events.len(), usize::from(reason.is_some()));
+        if reason.is_some() {
+            assert_eq!(batch.cancelled_events[0].event.content, "fixture request");
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires BUZZ_TEST_PUBLICATION_CLI and BUZZ_TEST_ISSUER_OUTPUT"]
+async fn publication_pool_e2e_heartbeat_reuse() {
+    let cli = std::env::var("BUZZ_TEST_PUBLICATION_CLI").unwrap();
+    let output = PathBuf::from(std::env::var("BUZZ_TEST_ISSUER_OUTPUT").unwrap());
+    let root = tempfile::Builder::new()
+        .prefix("issuer-heartbeat-")
+        .tempdir_in(output)
+        .unwrap()
+        .keep();
+    let (endpoint, events, server) = relay().await;
+    let channel = Uuid::new_v4();
+    let (mut agent, ctx) = seat(&root, &cli, &endpoint, channel).await;
+    for turn in ["heartbeat-new", "heartbeat-reuse"] {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            run_prompt_task(
+                agent,
+                None,
+                Some("heartbeat fixture".into()),
+                ctx.clone(),
+                tx,
+                None,
+                turn.into(),
+                Default::default(),
+            ),
+        )
+        .await
+        .unwrap();
+        let result = rx.recv().await.unwrap();
+        assert!(
+            matches!(result.outcome, PromptOutcome::Ok(StopReason::EndTurn)),
+            "heartbeat CLI send failed"
+        );
+        agent = result.agent;
+    }
+    agent.acp.shutdown().await;
+    let wire = records(&root);
+    assert_eq!(
+        wire.iter()
+            .filter(|entry| entry["method"] == "session/new")
+            .count(),
+        1
+    );
+    assert_eq!(
+        wire.iter()
+            .filter(|entry| entry["method"] == "session/resume")
+            .count(),
+        0
+    );
+    let messages: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == 9)
+        .cloned()
+        .collect();
+    assert_eq!(
+        messages.len(),
+        4,
+        "native and MCP sends from both heartbeat turns"
+    );
+    for message in &messages {
+        let event: nostr::Event = serde_json::from_value(message.clone()).unwrap();
+        event.verify().unwrap();
+        assert_eq!(event.pubkey, ctx.agent_keys.public_key());
+        assert!(
+            matches!(event.content.as_str(), "issuer native" | "issuer mcp"),
+            "heartbeat must stay unlabeled"
+        );
+    }
+    std::fs::write(root.join("result.json"), serde_json::to_vec_pretty(&json!({"passed":true,"messages":messages,"wire":wire,"checks":["new heartbeat","reused heartbeat","native CLI send","MCP CLI send","unlabeled signed replies"]})).unwrap()).unwrap();
+    server.abort();
+    println!("heartbeat evidence: {}", root.join("result.json").display());
 }
 
 fn records(root: &Path) -> Vec<Value> {
