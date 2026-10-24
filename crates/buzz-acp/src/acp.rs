@@ -9,6 +9,7 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 mod launch;
+mod publication;
 
 use futures_util::StreamExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -146,6 +147,7 @@ fn build_initialize_params() -> serde_json::Value {
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
 pub struct AcpClient {
+    publication: publication::State,
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
     /// Sole stdin writer; None after an interrupted/failed frame closes it.
@@ -431,6 +433,9 @@ impl AcpClient {
     /// Call this when you need guaranteed cleanup — e.g., in `run_models`
     /// before process exit.
     pub async fn shutdown(&mut self) {
+        if let Err(error) = self.retire_publication().await {
+            tracing::warn!("publication retirement during shutdown: {error}");
+        }
         // Kill the entire process group when possible. The child was spawned
         // with process_group(0), so its PID == its PGID. Killing the group
         // ensures subprocesses (MCP servers, tool processes) are cleaned up
@@ -599,6 +604,9 @@ impl AcpClient {
         let claude_thinking_summaries = standard_adapter == Some(StandardAdapterKind::Claude)
             && !launch_prefixed
             && claude_cli_accepts_thinking_display(&cmd).await;
+        let publication = publication::State::from_command(&cmd)?;
+        cmd.env_remove("BUZZ_PUBLICATION_CONTEXT");
+        cmd.env_remove("BUZZ_PUBLICATION_TOKEN");
         let mut child = cmd.spawn().map_err(|error| {
             std::io::Error::new(
                 error.kind(),
@@ -616,6 +624,7 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
         Ok(Self {
+            publication,
             child,
             stdin: Some(stdin),
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
@@ -755,12 +764,15 @@ impl AcpClient {
             params["_meta"]["claudeCode"]["options"]["extraArgs"]["thinking-display"] =
                 serde_json::Value::String("summarized".to_owned());
         }
+        let original_params = params.clone();
+        self.publication.inject(&mut params)?;
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
             .as_str()
             .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
             .to_owned();
         tracing::info!(target: "acp::session", "session created: {session_id}");
+        self.publication.remember(&session_id, original_params)?;
         Ok(SessionNewResponse {
             session_id,
             raw: result,
@@ -929,6 +941,7 @@ impl AcpClient {
     ///
     /// Note: async because writing to stdin requires async I/O.
     pub async fn session_cancel(&mut self, session_id: &str) -> Result<(), AcpError> {
+        self.retire_publication().await?;
         let params = serde_json::json!({
             "sessionId": session_id,
         });
@@ -1098,6 +1111,7 @@ impl AcpClient {
         session_id: &str,
         hard_deadline: tokio::time::Instant,
     ) -> Result<StopReason, AcpError> {
+        self.retire_publication().await?;
         // Validate precondition before any side effects — fail fast if there's
         // no in-flight prompt (prevents writing permission responses or cancel
         // notifications to the agent when no prompt is active).
@@ -1188,7 +1202,12 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        if matches!(method, "session/new" | "session/resume") {
+            // Session environments carry publication credentials.
+            tracing::debug!(target: "acp::wire", "→ {method} id={id}");
+        } else {
+            tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        }
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -2378,6 +2397,7 @@ pub fn model_in_catalog(
 
 impl Drop for AcpClient {
     fn drop(&mut self) {
+        self.revoke_publication();
         // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
         // Kill the process group when possible so subprocesses don't leak.
         // Callers SHOULD still call `shutdown().await` for guaranteed reaping.

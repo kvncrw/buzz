@@ -102,8 +102,17 @@ pub(crate) fn acquire(
         .duration_since(UNIX_EPOCH)
         .map_err(|_| rejected("clock unavailable"))?
         .as_secs();
-    if context.version != 1 || context.state != "active" || context.token != token {
+    if !matches!(context.version, 1 | 2) || context.state != "active" || context.token != token {
         return Err(rejected("inactive or superseded token"));
+    }
+    if context.version == 2 {
+        let issuer = open_regular(&directory.join("issuer.lock"))?;
+        // An exclusive lease belongs only to the live harness. An orphaned
+        // context must fail closed even if a crash left its JSON active.
+        match FileExt::try_lock_shared(&issuer) {
+            Err(error) if error.kind() == fs2::lock_contended_error().kind() => {}
+            _ => return Err(rejected("issuer is no longer active")),
+        }
     }
     if context.expires_at <= now {
         return Err(rejected("expired context"));

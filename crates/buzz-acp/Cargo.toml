@@ -26,6 +26,7 @@ git-credential-nostr = { path = "../git-credential-nostr" }
 git-sign-nostr = { path = "../git-sign-nostr" }
 tempfile = "3"
 zeroize = { workspace = true }
+fs2 = "0.4.3"
 
 # Nostr
 nostr = { workspace = true }
