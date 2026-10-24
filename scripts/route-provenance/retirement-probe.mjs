@@ -142,6 +142,9 @@ try {
   for (const operation of ["send", "edit"]) {
     for (const scenario of [
       "active",
+      "live-issuer",
+      "orphaned-issuer",
+      "missing-issuer",
       "retired-before-entry",
       "retired-during-preflight",
       "superseded-during-preflight",
@@ -172,6 +175,11 @@ try {
         agent_pubkey: author,
         channel_id: channel,
       };
+      if (["live-issuer", "orphaned-issuer", "missing-issuer"].includes(scenario)) {
+        record.version = 2;
+        if (scenario !== "missing-issuer")
+          writeFileSync(path.join(directory, "issuer.lock"), "", { mode: 0o600 });
+      }
       if (scenario === "retired-before-entry") record.state = "retired";
       if (scenario === "wrong-channel") record.channel_id = randomUUID();
       if (scenario === "wrong-author") record.agent_pubkey = "0".repeat(64);
@@ -225,13 +233,13 @@ try {
       let holderExit;
       let result;
       try {
-        if (scenario === "busy-lock") {
+        if (scenario === "busy-lock" || scenario === "live-issuer") {
           holder = spawn(
             "python3",
             [
               "-c",
               "import fcntl,sys\nf=open(sys.argv[1],'r+')\nfcntl.flock(f,fcntl.LOCK_EX)\nprint('locked',flush=True)\nsys.stdin.read()\n",
-              path.join(directory, "lock"),
+              path.join(directory, scenario === "live-issuer" ? "issuer.lock" : "lock"),
             ],
             {
               env: { PATH: process.env.PATH },
@@ -269,7 +277,7 @@ try {
       const submissions = report.events.length - before;
       if (scenario.endsWith("preflight"))
         assert(retiredDuringPreflight, "Race barrier was not exercised");
-      const accepted = scenario === "active";
+      const accepted = scenario === "active" || scenario === "live-issuer";
       report.assertions.push({
         operation,
         scenario,

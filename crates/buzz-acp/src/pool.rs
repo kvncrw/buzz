@@ -2381,15 +2381,18 @@ fn with_canvas(prompt: Option<String>, canvas: Option<&str>) -> Option<String> {
 /// can never trigger the assert.
 ///
 /// On the happy path the read loop has already called `take()`, so this is a no-op.
-fn send_prompt_result(
+async fn send_prompt_result(
     result_tx: &mpsc::UnboundedSender<PromptResult>,
     turn_id: &str,
     mut agent: OwnedAgent,
     source: PromptSource,
-    outcome: PromptOutcome,
+    mut outcome: PromptOutcome,
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    if let Err(error) = agent.acp.retire_publication().await {
+        outcome = PromptOutcome::Error(error);
+    }
     let _ = result_tx.send(PromptResult {
         agent,
         source,
@@ -2428,6 +2431,28 @@ pub async fn run_prompt_task(
         None => PromptSource::Heartbeat,
     };
     let observer_channel_id = source.channel_id();
+    if let Err(error) = agent
+        .acp
+        .begin_publication(
+            &ctx.relay_url,
+            &ctx.agent_keys.public_key().to_hex(),
+            observer_channel_id,
+            &turn_id,
+            ctx.max_turn_duration,
+        )
+        .await
+    {
+        send_prompt_result(
+            &result_tx,
+            &turn_id,
+            agent,
+            source,
+            PromptOutcome::Error(error),
+            requeue_batch_if_queue(&ctx, batch),
+        )
+        .await;
+        return;
+    }
     // Thread conversation context requires the canonical root to distinguish
     // concurrent threads in the same channel's activity.
     let observer_thread_root = source.scope().and_then(SessionScope::root_event_id);
@@ -2524,7 +2549,8 @@ pub async fn run_prompt_task(
                     source,
                     PromptOutcome::ProjectContextIndeterminate(error.0),
                     requeue_batch_if_queue(&ctx, batch),
-                );
+                )
+                .await;
                 return;
             }
         },
@@ -2678,7 +2704,20 @@ pub async fn run_prompt_task(
     let (session_id, is_new_session) = match &source {
         PromptSource::Channel(scope) => {
             let cid = &scope.channel_id();
-            if let Some(sid) = agent.state.sessions.get(scope) {
+            if let Some(sid) = agent.state.sessions.get(scope).cloned() {
+                if let Err(error) = agent.acp.refresh_publication(&sid).await {
+                    agent.state.invalidate(&source);
+                    send_prompt_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        PromptOutcome::Error(error),
+                        requeue_batch_if_queue(&ctx, batch),
+                    )
+                    .await;
+                    return;
+                }
                 (sid.clone(), false)
             } else {
                 // The title includes channel and, for thread sessions, the
@@ -2727,7 +2766,8 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::AgentExited,
                             requeue_batch_if_queue(&ctx, batch),
-                        );
+                        )
+                        .await;
                         return;
                     }
                     Err(e) => {
@@ -2740,7 +2780,8 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::Error(e),
                             requeue_batch_if_queue(&ctx, batch),
-                        );
+                        )
+                        .await;
                         return;
                     }
                 }
@@ -2784,7 +2825,8 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::AgentExited,
                             None,
-                        );
+                        )
+                        .await;
                         return;
                     }
                     Err(e) => {
@@ -2795,7 +2837,8 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::Error(e),
                             None,
-                        );
+                        )
+                        .await;
                         return;
                     }
                 }
@@ -2908,7 +2951,8 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::AgentExited,
                         requeue_batch_if_queue(&ctx, batch),
-                    );
+                    )
+                    .await;
                     return;
                 }
                 Err(AcpError::IdleTimeout(_)) => {
@@ -2944,7 +2988,8 @@ pub async fn run_prompt_task(
                                 source,
                                 PromptOutcome::AgentExited,
                                 requeue_batch_if_queue(&ctx, batch),
-                            );
+                            )
+                            .await;
                             return;
                         }
                         Err(e) => {
@@ -2962,7 +3007,8 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
-                    );
+                    )
+                    .await;
                     return;
                 }
                 Err(AcpError::HardTimeout { silence }) => {
@@ -2980,7 +3026,8 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Hard { recently_active }),
                         requeue_batch_if_queue(&ctx, batch),
-                    );
+                    )
+                    .await;
                     return;
                 }
                 Err(e) => {
@@ -2996,7 +3043,8 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Error(e),
                         requeue_batch_if_queue(&ctx, batch),
-                    );
+                    )
+                    .await;
                     return;
                 }
             }
@@ -3154,7 +3202,8 @@ pub async fn run_prompt_task(
             source,
             PromptOutcome::Error(AcpError::Protocol("no batch and no prompt_text".into())),
             None,
-        );
+        )
+        .await;
         return;
     };
 
@@ -3289,7 +3338,7 @@ pub async fn run_prompt_task(
                                     source,
                                     PromptOutcome::Cancelled,
                                     retry_batch,
-                                );
+                                ).await;
                                 return;
                             }
                             Err(error) => {
@@ -3325,7 +3374,7 @@ pub async fn run_prompt_task(
                                     source,
                                     failure.outcome,
                                     failure.retry_batch,
-                                );
+                                ).await;
                                 return;
                             }
                         }
@@ -3391,7 +3440,7 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::Ok(StopReason::EndTurn),
                             None, // turn succeeded — batch was processed, no requeue
-                        );
+                        ).await;
                         return;
                     }
                 }
@@ -3467,7 +3516,8 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::Ok(stop_reason),
                 None,
-            );
+            )
+            .await;
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
@@ -3489,7 +3539,8 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::AgentExited,
                 requeue_batch_if_queue(&ctx, batch),
-            );
+            )
+            .await;
         }
         Err(AcpError::IdleTimeout(_)) => {
             tracing::warn!(
@@ -3523,7 +3574,8 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
-                    );
+                    )
+                    .await;
                 }
                 Err(AcpError::AgentExited) => {
                     tracing::error!(
@@ -3549,7 +3601,8 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::AgentExited,
                         requeue_batch_if_queue(&ctx, batch),
-                    );
+                    )
+                    .await;
                 }
                 Err(e) => {
                     tracing::error!(
@@ -3574,7 +3627,8 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
-                    );
+                    )
+                    .await;
                 }
             }
         }
@@ -3603,7 +3657,8 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::Timeout(TimeoutKind::Hard { recently_active }),
                 requeue_batch_if_queue(&ctx, batch),
-            );
+            )
+            .await;
         }
         Err(e) => {
             tracing::error!(target: "pool::prompt", "session_prompt error: {e}");
@@ -3630,7 +3685,8 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::Error(e),
                 requeue_batch_if_queue(&ctx, batch),
-            );
+            )
+            .await;
         }
     }
     // _reaction_guard drops here → spawns clear_reactions for all exit paths.
@@ -9770,7 +9826,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             source,
             PromptOutcome::Error(AcpError::Protocol("simulated session-create error".into())),
             None,
-        );
+        )
+        .await;
 
         // Receive the PromptResult back from the channel.
         let mut result = result_rx.recv().await.expect("PromptResult must be sent");
@@ -9831,7 +9888,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             source,
             PromptOutcome::Ok(StopReason::EndTurn),
             None,
-        );
+        )
+        .await;
 
         let mut result = result_rx.recv().await.expect("PromptResult must be sent");
 
