@@ -11922,7 +11922,22 @@ done"#
             (SessionPolicy::Thread, None, None, None, "Fizz"),
         ] {
             for (version, include_base) in [(1, true), (2, true), (1, false), (2, false)] {
-                let acp = spawn_switch_acp("[]", r#""result":{}"#).await;
+                // Inspect what the child receives: session observer writes
+                // deliberately redact the parameters that can contain secrets.
+                let script = r#"import json,sys
+for line in sys.stdin:
+ request=json.loads(line)
+ if 'id' in request:
+  print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'sess-1','received':request}}),flush=True)
+"#;
+                let acp = AcpClient::spawn(
+                    "python3",
+                    &["-E".into(), "-u".into(), "-c".into(), script.into()],
+                    &[],
+                    false,
+                )
+                .await
+                .unwrap();
                 let mut agent = switching_agent(acp, "unused");
                 agent.desired_model = None;
                 agent.protocol_version = version;
@@ -11950,10 +11965,12 @@ done"#
                     .snapshot()
                     .into_iter()
                     .find(|event| {
-                        event.kind == "acp_write" && event.payload["method"] == "session/new"
+                        event.kind == "acp_read"
+                            && event.payload["result"]["received"]["method"] == "session/new"
                     })
                     .unwrap()
                     .payload;
+                let request = &request["result"]["received"];
                 assert_eq!(request["params"]["_meta"]["sessionTitle"], title);
                 let base = ctx
                     .base_prompt
