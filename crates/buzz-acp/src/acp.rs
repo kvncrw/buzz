@@ -105,6 +105,9 @@ pub enum AcpError {
     #[error("Agent did not stop within {0:?} after cancellation")]
     CancelDrainTimeout(std::time::Duration),
 
+    #[error("Publication revoked; signer did not drain within {0:?}")]
+    PublicationDrainTimeout(std::time::Duration),
+
     #[error("Request timeout — agent did not respond within {0:?}")]
     Timeout(std::time::Duration),
 
@@ -941,11 +944,15 @@ impl AcpClient {
     ///
     /// Note: async because writing to stdin requires async I/O.
     pub async fn session_cancel(&mut self, session_id: &str) -> Result<(), AcpError> {
-        self.retire_publication().await?;
+        let directory = self.revoke_publication_for_drain();
         let params = serde_json::json!({
             "sessionId": session_id,
         });
-        self.send_notification("session/cancel", params).await
+        let (cancelled, retired) = tokio::join!(
+            self.send_notification("session/cancel", params),
+            publication::drain_retired(directory),
+        );
+        self.finish_publication_cancel(cancelled, retired)
     }
 
     /// Returns `true` if a `session/prompt` request is currently in flight.
@@ -1111,7 +1118,19 @@ impl AcpClient {
         session_id: &str,
         hard_deadline: tokio::time::Instant,
     ) -> Result<StopReason, AcpError> {
-        self.retire_publication().await?;
+        let directory = self.revoke_publication_for_drain();
+        let (cancelled, retired) = tokio::join!(
+            self.cancel_adapter_until(session_id, hard_deadline),
+            publication::drain_retired(directory),
+        );
+        self.finish_publication_cancel(cancelled, retired)
+    }
+
+    async fn cancel_adapter_until(
+        &mut self,
+        session_id: &str,
+        hard_deadline: tokio::time::Instant,
+    ) -> Result<StopReason, AcpError> {
         // Validate precondition before any side effects — fail fast if there's
         // no in-flight prompt (prevents writing permission responses or cancel
         // notifications to the agent when no prompt is active).
@@ -1171,7 +1190,13 @@ impl AcpClient {
         .await
         .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
         .map_err(AcpError::Io)?;
-        self.observe("acp_write", value.clone());
+        let observed = match value["method"].as_str() {
+            Some("session/new" | "session/resume") => serde_json::json!({
+                "jsonrpc": value["jsonrpc"], "id": value["id"], "method": value["method"],
+            }),
+            _ => value.clone(),
+        };
+        self.observe("acp_write", observed);
         Ok(())
     }
 

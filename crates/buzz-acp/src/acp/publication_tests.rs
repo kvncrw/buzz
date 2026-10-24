@@ -3,6 +3,9 @@ use super::*;
 use crate::acp::{EnvVar, McpServer, SystemPromptTransport};
 use std::time::Duration;
 
+#[path = "publication_regression_tests.rs"]
+mod regressions;
+
 async fn client(enabled: bool) -> AcpClient {
     client_with_launch(enabled, &[]).await
 }

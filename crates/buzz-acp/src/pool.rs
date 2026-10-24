@@ -2386,12 +2386,14 @@ async fn send_prompt_result(
     turn_id: &str,
     mut agent: OwnedAgent,
     source: PromptSource,
-    mut outcome: PromptOutcome,
+    outcome: PromptOutcome,
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
     if let Err(error) = agent.acp.retire_publication().await {
-        outcome = PromptOutcome::Error(error);
+        // The lease is already revoked. A local signer drain must not replace
+        // the adapter's result or falsely poison its healthy ACP transport.
+        agent.acp.report_retirement_failure(&error);
     }
     let _ = result_tx.send(PromptResult {
         agent,
