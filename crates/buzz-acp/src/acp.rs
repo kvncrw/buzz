@@ -952,7 +952,12 @@ impl AcpClient {
             self.send_notification("session/cancel", params),
             publication::drain_retired(directory),
         );
-        self.finish_publication_cancel(cancelled, retired)
+        if let Err(error) = &retired {
+            self.report_retirement_failure(error);
+        }
+        // A notification alone does not acknowledge an adapter stop.
+        cancelled?;
+        retired
     }
 
     /// Returns `true` if a `session/prompt` request is currently in flight.

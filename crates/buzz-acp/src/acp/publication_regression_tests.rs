@@ -296,3 +296,51 @@ async fn publication_control_cancel_keeps_adapter_grace_despite_stuck_signer() {
     drop(signer);
     acp.shutdown().await;
 }
+
+#[tokio::test]
+async fn publication_completed_cancel_survives_stuck_signer() {
+    let script = r#"import json,sys
+for line in sys.stdin:
+ m=json.loads(line)
+ if m['method']=='session/cancel':
+  print(json.dumps({'jsonrpc':'2.0','id':999,'result':{'stopReason':'cancelled'}}),flush=True)
+"#;
+    let mut acp = AcpClient::spawn_with_env(
+        "python3",
+        &["-E".into(), "-u".into(), "-c".into(), script.into()],
+        &[],
+        false,
+        &[("BUZZ_ROUTE_LABELS".into(), "1".into())],
+    )
+    .await
+    .unwrap();
+    acp.standard_adapter = Some(StandardAdapterKind::Claude);
+    let observer = ObserverHandle::in_process();
+    acp.set_observer(Some(observer.clone()), 0);
+    scope(&mut acp, Uuid::new_v4(), "completed-cancel").await;
+    let directory = acp
+        .publication
+        .active
+        .as_ref()
+        .unwrap()
+        .directory
+        .path()
+        .to_owned();
+    let signer = File::open(directory.join("lock")).unwrap();
+    FileExt::lock_shared(&signer).unwrap();
+    acp.last_prompt_id = Some(999);
+    let result = acp
+        .cancel_with_cleanup_grace("session-a", Duration::from_secs(2))
+        .await;
+    assert!(
+        matches!(result, Ok(StopReason::Cancelled)),
+        "completed stop was replaced: {result:?}"
+    );
+    assert!(!directory.exists());
+    assert!(observer
+        .snapshot()
+        .iter()
+        .any(|frame| frame.kind == "publication_retirement_failed"));
+    drop(signer);
+    acp.shutdown().await;
+}
