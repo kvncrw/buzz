@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 pub(super) struct State {
     enabled: bool,
+    unscoped_turn: bool,
     active: Option<Lease>,
     sessions: HashMap<String, Value>,
 }
@@ -49,6 +50,7 @@ impl State {
         };
         Ok(Self {
             enabled,
+            unscoped_turn: false,
             active: None,
             sessions: HashMap::new(),
         })
@@ -58,12 +60,18 @@ impl State {
         if !self.enabled {
             return Ok(());
         }
-        let lease = self.active.as_ref().ok_or_else(failure)?;
-        let env = json!({
-            "BUZZ_ROUTE_LABELS": "1",
-            "BUZZ_PUBLICATION_CONTEXT": lease.directory.path().to_str().ok_or_else(failure)?,
-            "BUZZ_PUBLICATION_TOKEN": lease.token,
-        });
+        let env = if self.unscoped_turn {
+            // A heartbeat has no channel authority. Clear inherited values in
+            // both execution environments, including on session reuse.
+            json!({"BUZZ_ROUTE_LABELS": "0", "BUZZ_PUBLICATION_CONTEXT": "", "BUZZ_PUBLICATION_TOKEN": ""})
+        } else {
+            let lease = self.active.as_ref().ok_or_else(failure)?;
+            json!({
+                "BUZZ_ROUTE_LABELS": "1",
+                "BUZZ_PUBLICATION_CONTEXT": lease.directory.path().to_str().ok_or_else(failure)?,
+                "BUZZ_PUBLICATION_TOKEN": lease.token,
+            })
+        };
         params["_meta"]["claudeCode"]["options"]["env"] = env.clone();
         for server in params["mcpServers"].as_array_mut().ok_or_else(failure)? {
             let entries = server["env"].as_array_mut().ok_or_else(failure)?;
@@ -104,16 +112,22 @@ impl AcpClient {
         lifetime: Duration,
     ) -> Result<(), AcpError> {
         self.retire_publication().await?;
+        self.publication.unscoped_turn = channel.is_none();
         if !self.publication.enabled {
             return Ok(());
         }
+        let Some(channel) = channel else {
+            return Ok(());
+        };
         if self.standard_adapter != Some(StandardAdapterKind::Claude) {
             return Err(AcpError::Protocol(
                 "route labels currently require Claude ACP".into(),
             ));
         }
-        let channel = channel.ok_or_else(failure)?;
-        if lifetime.is_zero() || lifetime > Duration::from_secs(86400) || turn.is_empty() {
+        if lifetime.is_zero()
+            || lifetime > Duration::from_secs(crate::config::MAX_TURN_DURATION_CEILING_SECS)
+            || turn.is_empty()
+        {
             return Err(failure());
         }
         nostr::PublicKey::from_hex(author).map_err(|_| failure())?;
@@ -171,31 +185,41 @@ impl AcpClient {
     }
 
     pub(crate) async fn retire_publication(&mut self) -> Result<(), AcpError> {
-        let Some(lease) = self.publication.active.take() else {
-            return Ok(());
-        };
+        let directory = self.revoke_publication_for_drain();
+        drain_retired(directory).await
+    }
+
+    pub(super) fn revoke_publication_for_drain(&mut self) -> Option<TempDir> {
+        let lease = self.publication.active.take()?;
         let Lease {
             directory, _issuer, ..
         } = lease;
         // Stop admitting publishers before draining the ones already signing.
         // The directory remains alive through the drain, preserving its inode.
         drop(_issuer);
-        let lock = File::open(directory.path().join("lock"))?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-        loop {
-            match FileExt::try_lock_exclusive(&lock) {
-                Ok(()) => return Ok(()),
-                Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(AcpError::Protocol(
-                            "publication revoked; signer did not drain before deadline".into(),
-                        ));
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => return Err(error.into()),
-            }
+        Some(directory)
+    }
+
+    pub(crate) fn report_retirement_failure(&self, error: &AcpError) {
+        tracing::warn!(target: "acp::publication", %error, "publication revoked; retirement failed");
+        self.observe(
+            "publication_retirement_failed",
+            json!({"error": error.to_string()}),
+        );
+    }
+
+    pub(super) fn finish_publication_cancel<T>(
+        &self,
+        cancelled: Result<T, AcpError>,
+        retired: Result<(), AcpError>,
+    ) -> Result<T, AcpError> {
+        if let Err(error) = &retired {
+            self.report_retirement_failure(error);
         }
+        // Preserve adapter failures, especially its bounded cancellation deadline.
+        let result = cancelled?;
+        retired?;
+        Ok(result)
     }
 
     pub(crate) async fn refresh_publication(
@@ -218,6 +242,27 @@ impl AcpClient {
             return Err(failure());
         }
         Ok(Some(response))
+    }
+}
+
+pub(super) async fn drain_retired(directory: Option<TempDir>) -> Result<(), AcpError> {
+    let Some(directory) = directory else {
+        return Ok(());
+    };
+    let lock = File::open(directory.path().join("lock"))?;
+    let grace = Duration::from_secs(1);
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        match FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(AcpError::PublicationDrainTimeout(grace));
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 

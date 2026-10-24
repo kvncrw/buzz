@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PEER: &str = r#"
-import hashlib,json,os,pathlib,subprocess,sys
+import fcntl,hashlib,json,os,pathlib,subprocess,sys
 root=pathlib.Path(sys.argv[1]); sessions={}; sequence=0
+signers=[]
 def record(value):
  with (root/'wire.jsonl').open('a') as f: f.write(json.dumps(value)+'\n')
 for line in sys.stdin:
@@ -29,6 +30,10 @@ for line in sys.stdin:
  elif method=='session/prompt':
   s=sessions[p['sessionId']]; native=s['_meta']['claudeCode']['options']['env']
   context=json.loads((pathlib.Path(native['BUZZ_PUBLICATION_CONTEXT'])/'context.json').read_text())
+  if (root/'hold-signer').exists():
+   signer=open(pathlib.Path(native['BUZZ_PUBLICATION_CONTEXT'])/'lock')
+   fcntl.flock(signer,fcntl.LOCK_SH); signers.append(signer)
+   print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':{'stopReason':'end_turn'}}),flush=True); continue
   for kind,env in [('native',native),('mcp',{e['name']:e['value'] for e in s['mcpServers'][0]['env']})]:
    combined=dict(os.environ,**env); combined.pop('BUZZ_AUTH_TAG',None)
    call=subprocess.run([combined['BUZZ_TEST_PUBLICATION_CLI'],'messages','send','--channel',context['channel_id'],'--content','issuer '+kind],env=combined,capture_output=True,timeout=5)
@@ -215,6 +220,36 @@ fn records(root: &Path) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+#[tokio::test]
+async fn publication_success_survives_stuck_signer_retirement() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("hold-signer"), "1").unwrap();
+    let (endpoint, _, server) = relay().await;
+    let channel = Uuid::new_v4();
+    let (agent, mut ctx) = seat(root.path(), "unused", &endpoint, channel).await;
+    Arc::get_mut(&mut ctx).unwrap().initial_message = None;
+    let observer = crate::observer::ObserverHandle::in_process();
+    let mut agent = agent;
+    agent.acp.set_observer(Some(observer.clone()), 0);
+    let mut result = turn(agent, ctx, channel, "stuck-signer-success").await;
+    assert!(
+        matches!(result.outcome, PromptOutcome::Ok(_)),
+        "retirement must preserve the completed adapter outcome"
+    );
+    assert!(
+        observer
+            .snapshot()
+            .iter()
+            .any(|event| event.kind == "publication_retirement_failed"),
+        "retirement failure must remain observable"
+    );
+    for entry in records(root.path()) {
+        assert!(!Path::new(entry["directory"].as_str().unwrap()).exists());
+    }
+    result.agent.acp.shutdown().await;
+    server.abort();
 }
 
 #[tokio::test]

@@ -12,8 +12,11 @@ CLI displays `[routing unknown]`.
 1. Default-off sessions must keep their existing protocol requests unchanged.
    The effective operator launch environment must win over persona defaults,
    including an explicit `BUZZ_ROUTE_LABELS=0` override.
-2. An unsupported adapter, missing channel, invalid lifetime, or failed write
-   must fail before the model receives an authorized prompt.
+2. An unsupported adapter, invalid lifetime, or failed write must fail before
+   the model receives an authorized channel prompt. Preserve the configured
+   seven-day ceiling (604,800 seconds). Heartbeats have no channel: skip
+   issuance and explicitly disable labels and clear credentials in their
+   native and MCP environments, including session reuse.
 3. Each turn gets a new directory and token. Native Claude tools and supplied
    MCP tools must receive the same context. Other session parameters survive.
 4. Reusing a session refreshes its environment through the installed adapter's
@@ -26,6 +29,10 @@ CLI displays `[routing unknown]`.
    Wait at most one second for an admitted signer. If it remains stuck, revoke
    the issuer lease and report failure; do not claim orderly retirement. Process
    death cannot recall an event already admitted to the signing critical section.
+   A signer drain uses `PublicationDrainTimeout`, never a protocol error.
+   Preserve completed prompt outcomes and report retirement failure separately.
+   Send Stop after revocation, concurrently with signer draining, so the adapter
+   retains its five-second control grace and timeout classification.
 6. Two concurrent seats and two channels must not share contexts. A new turn
    cannot recover an old turn's primary or degraded snapshot.
 7. The CLI must reject an orphaned version-two context, even if its JSON still
@@ -33,6 +40,8 @@ CLI displays `[routing unknown]`.
 8. Run the actual harness/CLI workflow and the full ACP and CLI package suites.
    Save source state, binary hashes, assertions, and a negative-control result.
    Run full repository CI before requesting Grok's review and Fable's merge.
+9. Session creation and resume must omit parameters from `acp_write` observer
+   frames while delivering the complete environment to the adapter.
 
 ## Remaining transport boundary
 
