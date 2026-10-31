@@ -1,0 +1,138 @@
+name: pagoda desktop
+
+# PAT pushes from pagoda-sync trigger this coordinator. Publishing never moves
+# the manually accepted release used by /releases/latest/download/latest.json.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Full pagoda commit SHA (default: triggering commit)"
+        type: string
+        required: false
+  push:
+    branches: [pagoda]
+    paths-ignore:
+      - ".github/workflows/pagoda-relay-image.yml"
+      - ".github/workflows/pagoda-sync.yml"
+      - ".pagoda/sync.sh"
+      - ".pagoda/railway-deploy.sh"
+      - "**.md"
+
+# Serialize every entry point, including manual retries and sync-triggered runs.
+concurrency:
+  group: pagoda-desktop
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  setup:
+    name: Freeze desktop build identity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - name: Reject mutable manual refs
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+        run: |
+          if [[ -n "$REQUESTED_REF" ]]; then
+            [[ "$REQUESTED_REF" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "::error::ref must be an immutable full commit SHA"
+              exit 1
+            }
+          fi
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select immutable SHA and version
+        id: identity
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          SOURCE_SHA=$(git rev-parse HEAD)
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/pagoda
+          BASE=$(jq -er .version desktop/src-tauri/tauri.conf.json)
+          [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          # run_id is shared by the builders and does not reset per workflow.
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "version=${BASE}-pagoda.${RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Exercise complete-release and retry gates
+        run: python3 .pagoda/tests/test-desktop-release.py --artifact target/pagoda-release-fixtures/result.json
+
+      - name: Retain release-gate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pagoda-desktop-gate-${{ github.run_id }}
+          path: target/pagoda-release-fixtures/result.json
+          if-no-files-found: error
+          overwrite: true
+
+  linux:
+    needs: setup
+    permissions:
+      contents: read
+    uses: ./.github/workflows/pagoda-desktop-linux.yml
+    with:
+      source_sha: ${{ needs.setup.outputs.source_sha }}
+      version: ${{ needs.setup.outputs.version }}
+    secrets: inherit
+
+  windows:
+    needs: setup
+    permissions:
+      contents: read
+    uses: ./.github/workflows/pagoda-desktop-windows.yml
+    with:
+      source_sha: ${{ needs.setup.outputs.source_sha }}
+      version: ${{ needs.setup.outputs.version }}
+    secrets: inherit
+
+  publish:
+    name: Publish complete desktop release
+    needs: [setup, linux, windows]
+    if: needs.linux.result == 'success' && needs.windows.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      SOURCE_SHA: ${{ needs.setup.outputs.source_sha }}
+      VERSION: ${{ needs.setup.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.setup.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download Linux build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pagoda-desktop-linux-${{ github.run_id }}
+          path: artifacts/linux-x86_64
+
+      - name: Download Windows build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pagoda-desktop-windows-${{ github.run_id }}
+          path: artifacts/windows-x86_64
+
+      - name: Validate, upload draft, and publish complete release
+        run: |
+          python3 .pagoda/desktop-release.py publish --sha "$SOURCE_SHA" --version "$VERSION" \
+            --repo "$GITHUB_REPOSITORY" --artifacts artifacts --output staged
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/desktop-v${VERSION}" >> "$GITHUB_STEP_SUMMARY"

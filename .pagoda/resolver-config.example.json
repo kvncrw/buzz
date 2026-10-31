@@ -1,0 +1,14 @@
+{
+  "fork_url": "https://github.com/example/buzz.git",
+  "upstream_url": "https://github.com/block/buzz.git",
+  "workflow_url": "https://github.com/example/buzz/actions/workflows/pagoda-sync.yml",
+  "channel": "channel-uuid",
+  "reply_to": "thread-event-id",
+  "agent_name": "Astra",
+  "agent_pubkey": "repair-agent-public-key",
+  "owner_name": "Kevin C",
+  "owner_pubkey": "decision-maker-public-key",
+  "sender_pubkey": "fable-seat-public-key",
+  "notification_interval_seconds": 600,
+  "buzz_command": ["buzz"]
+}
