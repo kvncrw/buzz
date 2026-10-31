@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
@@ -34,8 +35,11 @@ import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
 import 'message_content/link_normalizer.dart';
+import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
+import 'message_content/buzz_link_label.dart';
+import 'message_content/channel_token_pattern.dart';
 import 'message_mention_pill.dart';
 import 'message_gallery.dart';
 import 'message_gallery_frame.dart';
@@ -44,6 +48,7 @@ import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
+part 'message_content/message_preview.dart';
 part 'message_content/bubble_shape.dart';
 part 'message_content/inline_components.dart';
 part 'message_content/token_pill.dart';
@@ -610,22 +615,21 @@ class MessageContent extends HookConsumerWidget {
         buzzLink is MessageDeepLink ||
         buzzLink is EntityDeepLink;
     final isCanonicalBuzzLabel = isBuzzLink && text == url;
+    String? channelName(String id) =>
+        _channelNameForId(resolvedChannelNames, id);
+    final buzzLabel = buzzLinkLabel(buzzLink, channelName);
     final buzzPresentation = switch (buzzLink) {
-      ChannelDeepLink(:final channelId) => (
+      ChannelDeepLink() => (
         icon: BuzzIcons.hash,
-        label:
-            _channelNameForId(resolvedChannelNames, channelId) ??
-            channelId.substring(0, math.min(8, channelId.length)),
-        semanticLabel:
-            'Open channel ${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))}',
+        label: buzzLabel!,
+        semanticLabel: 'Open channel $buzzLabel',
         interactive: true,
       ),
       MessageDeepLink(:final channelId, :final messageId) => (
         icon: BuzzIcons.messageSquare,
-        label:
-            '${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))} · ${messageId.substring(0, math.min(8, messageId.length))}',
+        label: buzzLabel!,
         semanticLabel:
-            'Open message ${messageId.substring(0, math.min(8, messageId.length))} in channel ${_channelNameForId(resolvedChannelNames, channelId) ?? channelId.substring(0, math.min(8, channelId.length))}',
+            'Open message ${shortBuzzId(messageId)} in channel ${buzzChannelLabel(channelId, channelName)}',
         interactive: true,
       ),
       EntityDeepLink(:final type, :final repository, :final eventId) => (
@@ -634,14 +638,12 @@ class MessageContent extends HookConsumerWidget {
           'pr' => BuzzIcons.gitPullRequest,
           _ => BuzzIcons.circleDot,
         },
-        label: type == 'repo'
-            ? repository
-            : '$repository · ${eventId!.substring(0, 8)}',
+        label: buzzLabel!,
         semanticLabel: switch (type) {
           'repo' => 'Repository $repository',
           'pr' =>
-            'Pull request ${eventId!.substring(0, 8)} in repository $repository',
-          _ => 'Issue ${eventId!.substring(0, 8)} in repository $repository',
+            'Pull request ${shortBuzzId(eventId ?? '')} in repository $repository',
+          _ => 'Issue ${shortBuzzId(eventId ?? '')} in repository $repository',
         },
         interactive: false,
       ),
@@ -715,8 +717,9 @@ class MessageContent extends HookConsumerWidget {
           );
         } catch (_) {
           if (!context.mounted) return;
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
             const SnackBar(content: Text('Could not open attachment')),
+            kind: ToastKind.error,
           );
         }
       },
@@ -914,7 +917,7 @@ class _MessageCodeBlock extends HookWidget {
     final isCopied = useState(false);
 
     Future<void> handleCopy() async {
-      await copyToClipboard(context, code, message: 'Copied code to clipboard');
+      await copyToClipboard(context, code, message: 'Code copied');
       if (!context.mounted) return;
       isCopied.value = true;
       Future.delayed(const Duration(seconds: 2), () {

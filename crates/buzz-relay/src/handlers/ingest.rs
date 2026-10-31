@@ -3818,7 +3818,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn check_channel_write_denies_when_channel_lookup_fails() {
-        let state = crate::state::tests::test_state_with_database_url(
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
             "postgres://buzz:buzz_dev@127.0.0.1:1/buzz", // sadscan:disable np.postgres.1
         )
         .await;
@@ -4121,9 +4121,10 @@ mod postgres_tests {
 
         let submitted = store
             .submit(
-                &host,
+                Some(&host),
                 "test-operator",
                 Some("lane3 ingest fence regression"),
+                None,
             )
             .await
             .expect("submit");
@@ -7145,6 +7146,102 @@ mod postgres_tests {
         assert_eq!(stored.channel_id, Some(channels[0]));
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn subject_cannot_delete_relay_verified_profile() {
+        use buzz_core::kind::KIND_VERIFIED_PROFILE;
+        use buzz_db::verified_profiles::ProfileAdmission;
+        use nostr::Tag;
+        let f = ScopedTargetFixture::new("verified-profile-deletion").await;
+        let subject = f.author.public_key().to_hex();
+        let now = Utc::now();
+        let profile = f
+            .state
+            .db
+            .publish_verified_profile(
+                ProfileAdmission {
+                    community: f.tenant.community(),
+                    issuer: "https://issuer.test",
+                    pubkey: &subject,
+                    issued_at: now,
+                    admitted_at: now,
+                    display_name: "Alice",
+                    username: "alice",
+                    full_name: Some("Alice Example"),
+                    label: "Example",
+                    refresh_seconds: 3600,
+                    membership_required: false,
+                },
+                &f.state.relay_keypair,
+            )
+            .await
+            .unwrap()
+            .expect("publish relay-owned profile");
+        let auth = || IngestAuth::Http {
+            pubkey: f.author.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let deletion = |tag: Tag| {
+            EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "")
+                .tags([tag])
+                .sign_with_keys(&f.author)
+                .unwrap()
+        };
+        let coordinate = |author: String| {
+            Tag::parse([
+                "a".to_owned(),
+                format!("{KIND_VERIFIED_PROFILE}:{author}:{subject}"),
+            ])
+            .unwrap()
+        };
+        for tag in [
+            Tag::parse(["e", &profile.id.to_hex()]).unwrap(),
+            coordinate(profile.pubkey.to_hex()),
+            // Even a subject-authored coordinate cannot request deletion of this kind.
+            coordinate(subject.clone()),
+        ] {
+            let event = deletion(tag);
+            let id = event.id;
+            let result = f.submit(event, auth()).await;
+            assert!(
+                matches!(&result, Err(IngestError::Rejected(message))
+                    if message == "invalid: deletion target not found or not deletable by you"),
+                "profile deletion must be denied, got {:?}",
+                result.err()
+            );
+            assert!(f
+                .state
+                .db
+                .get_event_by_id(f.tenant.community(), id.as_bytes())
+                .await
+                .unwrap()
+                .is_none());
+            let stored = f
+                .state
+                .db
+                .get_event_by_id(f.tenant.community(), profile.id.as_bytes())
+                .await
+                .unwrap()
+                .expect("profile remains readable");
+            assert_eq!(stored.event, profile);
+        }
+
+        f.submit(
+            deletion(Tag::parse(["e", &f.global.id.to_hex()]).unwrap()),
+            auth(),
+        )
+        .await
+        .expect("ordinary author-owned note remains deletable");
+        assert!(f
+            .state
+            .db
+            .get_event_by_id(f.tenant.community(), f.global.id.as_bytes())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
     /// A community with `author`'s live message in an open channel, an
     /// author global note, and a second open channel for out-of-scope tokens.
     struct ScopedTargetFixture {
@@ -7751,9 +7848,8 @@ mod postgres_tests {
         use sqlx::postgres::PgConnectOptions;
         use tokio_util::sync::CancellationToken;
 
-        // A schema with bans but no `users` table: the ban commits, and only
-        // the owned-agent lookup fails. It carries `communities` and the
-        // deletion lock key so the ban passes community write admission.
+        // A supported ban writer commits before the users table is taken away:
+        // only the subsequent owned-agent lookup fails.
         let db_url = crate::test_support::database_url();
         let admin = sqlx::PgPool::connect(&db_url)
             .await
@@ -7761,6 +7857,8 @@ mod postgres_tests {
         let schema = format!("revoke_owner_{}", Uuid::new_v4().simple());
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "CREATE SCHEMA {schema}; \
+             CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
+             CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
              CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
              CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
              CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
@@ -7842,6 +7940,10 @@ mod postgres_tests {
             )
             .await
             .expect("ban commits");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TABLE {schema}.users")))
+            .execute(&admin)
+            .await
+            .expect("break only the post-commit owner lookup");
         let revoked = state
             .revoke_live_access(
                 &tenant,

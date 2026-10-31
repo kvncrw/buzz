@@ -826,6 +826,11 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
             state.conn_manager.mark_admitted(conn_id);
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
+            crate::verified_profiles::admitted(
+                &state,
+                &conn.tenant,
+                conn.nip_fi_assertion.as_ref(),
+            );
             // _auth_permit drops here — expiry's write guard may proceed.
         }
         Err(e) => {
@@ -4077,7 +4082,7 @@ mod tests {
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _recorder_guard = metrics::set_default_local_recorder(&recorder);
-        let state = crate::state::tests::test_state_with_database_url(
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
             "postgres://buzz:buzz_dev@127.0.0.1:1/buzz",
         )
         .await;

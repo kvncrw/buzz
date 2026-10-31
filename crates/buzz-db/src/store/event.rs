@@ -548,6 +548,9 @@ pub(crate) async fn query_events_with_operation(
     q: &EventQuery,
     operation: crate::observability::WriterOperation,
 ) -> Result<Vec<StoredEvent>> {
+    if let Some(answer) = answer_without_db(q) {
+        return answer;
+    }
     let mut conn = crate::observability::acquire_writer(pool, operation).await?;
     query_events_on(&mut conn, q).await
 }
@@ -559,32 +562,8 @@ pub(crate) async fn query_events_on(
     conn: &mut sqlx::PgConnection,
     q: &EventQuery,
 ) -> Result<Vec<StoredEvent>> {
-    // Composite cursor requires both halves.
-    if q.before_id.is_some() && q.until.is_none() {
-        return Err(DbError::InvalidData(
-            "before_id requires until to be set".to_string(),
-        ));
-    }
-
-    // global_only and channel_id are mutually exclusive.
-    if q.global_only && q.channel_id.is_some() {
-        return Err(DbError::InvalidData(
-            "global_only and channel_id are mutually exclusive".to_string(),
-        ));
-    }
-
-    // Empty list means "match nothing" — return empty immediately.
-    if q.kinds.as_deref().is_some_and(|k| k.is_empty()) {
-        return Ok(vec![]);
-    }
-    if q.authors.as_deref().is_some_and(|a| a.is_empty()) {
-        return Ok(vec![]);
-    }
-    if q.ids.as_deref().is_some_and(|i| i.is_empty()) {
-        return Ok(vec![]);
-    }
-    if q.e_tags.as_deref().is_some_and(|e| e.is_empty()) {
-        return Ok(vec![]);
+    if let Some(answer) = answer_without_db(q) {
+        return answer;
     }
 
     let mut qb = build_query_events_sql(q);
@@ -599,10 +578,44 @@ pub(crate) async fn query_events_on(
     Ok(out)
 }
 
-/// SQL for [`query_events_on`], after its match-nothing early returns.
+/// The result of `q` when its shape alone decides it: an invalid query, or one
+/// that matches nothing. Every entry point checks this before it takes a
+/// connection, so a match-nothing read (a NIP-01 `limit: 0` live REQ, say)
+/// costs no pool acquire.
+pub(crate) fn answer_without_db(q: &EventQuery) -> Option<Result<Vec<StoredEvent>>> {
+    // Composite cursor requires both halves.
+    if q.before_id.is_some() && q.until.is_none() {
+        return Some(Err(DbError::InvalidData(
+            "before_id requires until to be set".to_string(),
+        )));
+    }
+
+    // global_only and channel_id are mutually exclusive.
+    if q.global_only && q.channel_id.is_some() {
+        return Some(Err(DbError::InvalidData(
+            "global_only and channel_id are mutually exclusive".to_string(),
+        )));
+    }
+
+    // A zero page, or an empty list, means "match nothing".
+    let matches_nothing = page_limit(q) == 0
+        || q.kinds.as_deref().is_some_and(|k| k.is_empty())
+        || q.authors.as_deref().is_some_and(|a| a.is_empty())
+        || q.ids.as_deref().is_some_and(|i| i.is_empty())
+        || q.e_tags.as_deref().is_some_and(|e| e.is_empty());
+    matches_nothing.then(|| Ok(vec![]))
+}
+
+/// The `LIMIT` [`query_events_on`] applies: the requested page, clamped.
+fn page_limit(q: &EventQuery) -> i64 {
+    q.limit
+        .unwrap_or(100)
+        .min(q.max_limit.unwrap_or(DEFAULT_MAX_PAGE_LIMIT))
+}
+
+/// SQL for [`query_events_on`], after [`answer_without_db`].
 fn build_query_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
-    let clamp = q.max_limit.unwrap_or(DEFAULT_MAX_PAGE_LIMIT);
-    let limit_val = q.limit.unwrap_or(100).min(clamp);
+    let limit_val = page_limit(q);
     let offset_val = q.offset.unwrap_or(0);
 
     // e-tag reads filter inside a MATERIALIZED CTE and sort/limit outside it.
@@ -1544,6 +1557,8 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     let deleted = purged > 0 || result.rows_affected() > 0;
 
     if deleted {
+        sqlx::query("UPDATE artifact_heads SET modified_at=clock_timestamp() WHERE community_id=$1 AND artifact_id=(SELECT artifact_id FROM artifact_revisions WHERE community_id=$1 AND event_id=$2) AND event_id=$2")
+            .bind(community_id.as_uuid()).bind(event_id).execute(tx.conn()).await?;
         if let Some(pid) = parent_event_id {
             sqlx::query(
                 "UPDATE thread_metadata \
@@ -2351,6 +2366,9 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if let Some(answer) = crate::event::answer_without_db(q) {
+            return answer;
+        }
         let predicate = crate::RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
         match self
             .route_read(
@@ -2411,6 +2429,9 @@ impl Db {
         path: &'static str,
         q: &EventQuery,
     ) -> Result<Vec<StoredEvent>> {
+        if let Some(answer) = crate::event::answer_without_db(q) {
+            return answer;
+        }
         match self
             .route_read(
                 path,
@@ -2933,6 +2954,7 @@ mod e_tag_filter_shape_tests {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::ScratchDb;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
@@ -5290,37 +5312,6 @@ mod postgres_tests {
         );
     }
 
-    async fn admin_url() -> String {
-        crate::test_support::database_url()
-    }
-
-    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
-        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(admin)
-            .await
-            .expect("create scratch db");
-        let base = admin_url().await;
-        let idx = base.rfind('/').expect("db url has a path segment");
-        let scratch_url = format!("{}/{}", &base[..idx], name);
-        let pool = PgPool::connect(&scratch_url)
-            .await
-            .expect("connect scratch db");
-        crate::migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db");
-        (pool, name)
-    }
-
-    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(admin)
-        .await;
-    }
-
     fn make_mentioning_event(mentioned_hex: &str) -> nostr::Event {
         EventBuilder::new(Kind::Custom(9), "mentions someone")
             .tags(vec![Tag::parse(["p", mentioned_hex]).expect("p tag")])
@@ -5349,10 +5340,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn insert_event_mention_failure_rolls_back_the_event_insert() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin database");
-        let (scratch_pool, name) = create_scratch_db(&admin, "event_mention_rollback").await;
+        let (scratch_pool, _scratch) = ScratchDb::migrated(
+            &crate::test_support::database_url(),
+            "event_mention_rollback",
+        )
+        .await;
         install_mention_failure_injection(&scratch_pool).await;
 
         let db = Db::from_pool(scratch_pool.clone());
@@ -5380,8 +5372,6 @@ mod postgres_tests {
             persisted, 0,
             "event must not persist when mention indexing fails atomically"
         );
-
-        drop_scratch_db(&admin, scratch_pool, &name).await;
     }
 
     #[tokio::test]
@@ -5417,10 +5407,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn insert_event_with_thread_metadata_mention_failure_rolls_back_the_event_insert() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin database");
-        let (scratch_pool, name) = create_scratch_db(&admin, "event_thread_mention_rollback").await;
+        let (scratch_pool, _scratch) = ScratchDb::migrated(
+            &crate::test_support::database_url(),
+            "event_thread_mention_rollback",
+        )
+        .await;
         install_mention_failure_injection(&scratch_pool).await;
 
         let db = Db::from_pool(scratch_pool.clone());
@@ -5481,8 +5472,6 @@ mod postgres_tests {
             thread_meta_count, 0,
             "thread metadata must not persist when mention indexing fails atomically"
         );
-
-        drop_scratch_db(&admin, scratch_pool, &name).await;
     }
 
     #[tokio::test]

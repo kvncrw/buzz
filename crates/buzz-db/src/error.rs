@@ -37,6 +37,14 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// Invitation admission or minting was denied by authoritative restrictions.
+    #[error("invitation principal is restricted")]
+    InviteRestricted,
+
+    /// A verified invitation owner conflicts with the recorded owner.
+    #[error("invitation owner does not match the recorded owner")]
+    InviteOwnerMismatch,
+
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
@@ -68,6 +76,10 @@ pub enum DbError {
     /// operator/code remediation rather than blind retry.
     #[error("deletion safety error: {0}")]
     DeletionSafety(String),
+
+    /// An artifact sync page exceeds its resource limit.
+    #[error("artifact sync limit exceeded")]
+    ArtifactSyncLimit,
 
     /// A complete read-state snapshot exceeds its bounded resource budget.
     #[error("read-state snapshot exceeds event or byte limit")]

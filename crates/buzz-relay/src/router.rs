@@ -1994,7 +1994,7 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(
             tracing_opentelemetry::layer()
                 .with_tracer(provider.tracer("test"))
-                .with_filter(crate::telemetry::otel_env_filter(None)),
+                .with_filter(crate::telemetry::otel_filter(None)),
         );
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
         let service = ServiceBuilder::new()
@@ -2173,6 +2173,7 @@ mod tests {
         // Enforce that is the startup-race condition that must return 503 for
         // a token-carrying request.
         config.nip_fi = NipFiRelayConfig {
+            profile_policies: Vec::new(),
             source: Default::default(),
             mode,
             registry: IssuerRegistry::new(),
@@ -4036,6 +4037,7 @@ mod tests {
         };
 
         config.nip_fi = NipFiRelayConfig {
+            profile_policies: Vec::new(),
             source: Default::default(),
             mode: NipFiMode::Enforce,
             registry: {

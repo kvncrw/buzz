@@ -1,7 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
 
-import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../crypto/nip_oa.dart';
@@ -46,6 +47,35 @@ final meAssistantsProvider = FutureProvider<List<AgentDirectoryEntry>>((
     ),
   );
   return choices;
+}, retry: (_, _) => null);
+
+/// Reads the owner's inventory keys. Tests replace the read.
+final meAgentInventoryReadProvider = Provider<Future<Set<String>> Function()>((
+  ref,
+) {
+  final sync = ref.watch(meSyncProvider);
+  if (sync.connectionState != null) {
+    ref.watch(relaySessionProvider.select((state) => state.status));
+  }
+  return () async => (await loadMeAgentInventory(sync)).keys.toSet();
+});
+
+/// How long one inventory read is reused, watched or not.
+const meAgentInventoryMaxAge = Duration(seconds: 30);
+
+/// Every agent in the owner's inventory, archived ones included, like
+/// desktop's `agentChoices.identities`. Presentation only, never admission.
+/// Each read, failed ones included, is reused for [meAgentInventoryMaxAge]:
+/// then it is read again if still watched, or dropped.
+final meAgentInventoryProvider = FutureProvider.autoDispose<Set<String>>((ref) {
+  final read = ref.watch(meAgentInventoryReadProvider);
+  final link = ref.keepAlive();
+  final expiry = Timer(meAgentInventoryMaxAge, () {
+    ref.invalidateSelf();
+    link.close();
+  });
+  ref.onDispose(expiry.cancel);
+  return read();
 }, retry: (_, _) => null);
 
 /// Freshness-controlled ownership check for one personal-chat recipient.
@@ -105,7 +135,7 @@ List<AgentDirectoryEntry> _verifiedProfiles(
   final latest = <String, NostrEvent>{};
   for (final event in events) {
     try {
-      nostr.Event.fromJson(jsonEncode(event.toJson()));
+      verifiedNostrEventFromJson(jsonEncode(event.toJson()));
     } catch (_) {
       continue;
     }

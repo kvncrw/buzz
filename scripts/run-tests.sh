@@ -115,6 +115,10 @@ run_unit_tests() {
   run_test_step "buzz-sdk unit tests" \
     cargo test -p buzz-sdk --lib -- --nocapture
 
+  # buzz-workflow unit tests (infra-free). Mirrors `just test-unit`.
+  run_test_step "buzz-workflow unit tests" \
+    cargo test -p buzz-workflow --lib -- --nocapture
+
   # Keep the relay-to-agent trust-boundary regressions in the fallback path
   # when cargo-nextest is unavailable.
   run_test_step "buzz-acp tests" \
@@ -246,6 +250,9 @@ run_unit_tests() {
   run_test_step "buzz-relay mesh boot tests" \
     cargo test -p buzz-relay --lib mesh_boot::tests:: -- --nocapture
 
+  run_test_step "buzz-relay subscription registry tests" \
+    cargo test -p buzz-relay --lib subscription::tests:: -- --nocapture
+
   # telemetry and config tests mutate process env. libtest runs one process
   # with many threads (nextest, used by `just test-unit`, isolates each test),
   # so run them single-threaded here. `--skip` keeps the substring filter
@@ -271,6 +278,7 @@ run_unit_tests() {
       handlers::req::tests::timed_out_historical_read_deregisters_before_closed \
       handlers::req::tests::superseded_timeout_leaves_replacement_intact \
       handlers::req::tests::search_claim_retires_live_and_yields_to_replacement \
+      handlers::req::tests::failed_search_closes_without_eose_or_trying_later_filters \
       handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner \
       handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim \
       handlers::req::tests::revoke_then_replacement_keeps_replacement_whole \
@@ -287,8 +295,20 @@ run_unit_tests() {
       api::bridge::postgres_tests::bridge_search_mode_extension_accepts_prefix_snake_or_camel_case \
       api::bridge::postgres_tests::bridge_search_sort_extension_selects_newest_only_when_named
 
+  # Infra-free guard for the destructive invite fixture's database ownership
+  # check, by exact name: the rest of api::invites::postgres_tests needs a database.
+  run_test_step "buzz-relay invite fixture guard test" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      api::invites::postgres_tests::restriction_tests::postgres_tests::destructive_fixture_rejects_shared_database_urls
+
   run_test_step "buzz-relay readiness tests" \
     cargo test -p buzz-relay --lib readiness::tests:: -- --nocapture
+
+  run_test_step "buzz-relay accessible-channel cache tests" \
+    cargo test -p buzz-relay --lib -- --exact --nocapture \
+      state::tests::accessible_channel_invalidation_is_scoped_to_community \
+      state::tests::accessible_channels_join_member_and_open_halves \
+      state::tests::channel_deleted_invalidation_is_scoped_to_community
 
   run_test_step "buzz-relay admission regression test" \
     cargo test -p buzz-relay --lib state::tests::neither_a_confirmed_inactive_community_nor_a_failed_lookup_admits_the_socket -- --nocapture
@@ -406,8 +426,20 @@ run_unit_tests() {
   run_test_step "buzz-relay binary tests" \
     cargo test -p buzz-relay --bin buzz-relay -- --nocapture
 
+  run_test_step "buzz-relay invitation token and cutoff contracts" \
+    cargo test -p buzz-relay --lib invite_token:: -- --nocapture
+  run_test_step "buzz-relay invitation cutoff configuration" \
+    cargo test -p buzz-relay --lib config::invite_cutoff_tests:: -- --nocapture
+
+  run_test_step "buzz-relay mesh receive lifetime regression" \
+    cargo test -p buzz-relay --lib mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks -- --exact --nocapture
+
   run_test_step "buzz-relay boot lifecycle tests" \
     cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
+
+  # Load generator unit tests are infra-free. Keep in step with `just test-unit`.
+  run_test_step "buzz-test-client loadgen unit tests" \
+    cargo test -p buzz-test-client --lib loadgen:: -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

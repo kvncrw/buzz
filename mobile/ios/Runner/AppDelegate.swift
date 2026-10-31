@@ -67,6 +67,8 @@ import os.log
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    engineBridge.pluginRegistry.registrar(forPlugin: "BuzzToastLayer")?.register(
+      ToastLayerFactory(), withId: "buzz/toast_layer")
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosMediaCarousel") {
       registrar.register(IosMediaCarouselFactory(messenger: registrar.messenger()), withId: "buzz/ios_media_carousel")
     }
@@ -90,6 +92,10 @@ import os.log
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
+      if call.method == "isSupported" {
+        if #available(iOS 17.0, *) { result(true) } else { result(false) }
+        return
+      }
       guard call.method == "seal" else { result(FlutterMethodNotImplemented); return }
       guard #available(iOS 17.0, *) else {
         result(FlutterError(code: "unsupported", message: "Backup requires iOS 17 or later", details: nil)); return
@@ -1139,68 +1145,5 @@ extension BuzzPushNavigationTarget {
     ]
     arguments["threadRootId"] = threadRootID
     return arguments
-  }
-}
-
-
-/// Keeps the authentication callback scoped to the system browser session.
-private final class BuzzBrowserAuthBridge: NSObject, ASWebAuthenticationPresentationContextProviding {
-  private let channel: FlutterMethodChannel
-  private var session: ASWebAuthenticationSession?
-  private var pending: FlutterResult?
-  private var attemptID: UUID?
-
-  init(messenger: FlutterBinaryMessenger) {
-    channel = FlutterMethodChannel(name: "buzz/browser_auth", binaryMessenger: messenger)
-    super.init()
-    channel.setMethodCallHandler { [weak self] call, result in
-      guard let self else { return }
-      if call.method == "cancel" {
-        self.session?.cancel()
-        self.finish(nil, code: "cancelled")
-        result(nil)
-        return
-      }
-      guard call.method == "start" else { result(FlutterMethodNotImplemented); return }
-      guard self.session == nil,
-        let args = call.arguments as? [String: String],
-        let raw = args["url"], let url = URL(string: raw),
-        url.scheme == "https",
-        ["app.builderlab.xyz", "app.builderlabstaging.xyz"].contains(url.host ?? ""),
-        url.path == "/api/goose/v1/auth/login", url.user == nil, url.password == nil,
-        url.port == nil, url.fragment == nil
-      else { result(FlutterError(code: "unavailable", message: nil, details: nil)); return }
-      self.pending = result
-      let attemptID = UUID()
-      self.attemptID = attemptID
-      let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "xyz.block.buzz.mobile") { [weak self] callback, error in
-        DispatchQueue.main.async {
-          guard self?.attemptID == attemptID else { return }
-          let cancelled = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
-          self?.finish(callback?.absoluteString, code: cancelled ? "cancelled" : "unavailable")
-        }
-      }
-      session.presentationContextProvider = self
-      session.prefersEphemeralWebBrowserSession = false
-      #if DEBUG
-      session.prefersEphemeralWebBrowserSession = args["ephemeral"] == "true"
-      #endif
-      self.session = session
-      if !session.start() { self.finish(nil, code: "unavailable") }
-    }
-  }
-
-  private func finish(_ callback: String?, code: String) {
-    let result = pending
-    attemptID = nil
-    pending = nil
-    session = nil
-    if let callback { result?(callback) }
-    else { result?(FlutterError(code: code, message: nil, details: nil)) }
-  }
-
-  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-    UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-      .flatMap { $0.windows }.first(where: { $0.isKeyWindow }) ?? ASPresentationAnchor()
   }
 }

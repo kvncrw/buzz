@@ -86,23 +86,25 @@ class _NewMeProject extends HookConsumerWidget {
   }
 }
 
-class _MeChatRow extends StatelessWidget {
+class _MeChatRow extends ConsumerWidget {
   const _MeChatRow({
+    required this.channelId,
     required this.name,
     required this.onTap,
     required this.isUnread,
   });
+  final String channelId;
   final String name;
   final bool isUnread;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
-    final color = navigationPrimaryForeground(
-      context,
-    ).withValues(alpha: isUnread ? 1 : 0.8);
+  Widget build(BuildContext context, WidgetRef ref) {
+    final color = channelNavigationForeground(context, unread: isUnread);
+    final working = ref.watch(meWorkingAgentsProvider(channelId));
+    final status = working.isEmpty ? '' : ', ${working.join(', ')} working';
     return Semantics(
-      label: isUnread ? '$name, unread' : name,
+      label: '${isUnread ? '$name, unread' : name}$status',
       onTap: onTap,
       excludeSemantics: true,
       button: true,
@@ -112,31 +114,33 @@ class _MeChatRow extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(
             horizontal: Grid.xxs,
-            vertical: Grid.twelve,
+            vertical: Grid.inventoryRowInset,
           ),
           child: Row(
             children: [
               SizedBox(
-                width: 22,
+                width: 24,
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Icon(BuzzIcons.messageCircle, size: 18, color: color),
+                  child: Icon(BuzzIcons.messageCircle, size: 20, color: color),
                 ),
               ),
-              const SizedBox(width: Grid.xxs),
+              const SizedBox(width: Grid.inventoryLabelGap),
               Expanded(
                 child: Text(
                   name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: contentListTitleTextStyle.copyWith(
+                  style: navigationChatTitleTextStyle.copyWith(
                     color: color,
-                    fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
-                    fontSize: 17,
-                    height: 22 / 17,
+                    fontWeight: isUnread ? FontWeight.w600 : FontWeight.w400,
                   ),
                 ),
               ),
+              if (working.isNotEmpty) ...[
+                const SizedBox(width: Grid.xs),
+                SoloWorkingDots(color: color),
+              ],
             ],
           ),
         ),
