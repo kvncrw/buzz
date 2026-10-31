@@ -4400,6 +4400,116 @@ mod postgres_tests {
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::str::FromStr;
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn user_fences_survive_community_and_profile_deletion() {
+        assert_user_fence_retention().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_user_fences_survive_community_and_profile_deletion() {
+        assert_user_fence_retention().await;
+    }
+
+    async fn assert_user_fence_retention() {
+        use crate::user_deletion_fences::{self as fences, FenceIdentity};
+        let (db, store) = store().await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let entity = db
+            .user_deletion_store()
+            .submit("demo:fence-retention", "operator", None)
+            .await
+            .unwrap();
+        let entities = db.entity_deletion_store();
+        entities
+            .approve(
+                entity.id,
+                "approver",
+                entity.inventory_digest.as_deref().unwrap(),
+            )
+            .await
+            .unwrap();
+        let entity_lease = entities
+            .claim(entity.id, "fence-worker", Duration::from_secs(300))
+            .await
+            .unwrap()
+            .unwrap();
+        let human_key = nostr::Keys::generate().public_key();
+        let agent_key = nostr::Keys::generate().public_key();
+        let human = FenceIdentity::user(human_key);
+        let agent = FenceIdentity::agent(request.community_id, agent_key);
+        sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
+            .bind(request.community_id.as_uuid())
+            .bind(human_key.to_bytes().to_vec())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let mut tx = db.pool.begin().await.unwrap();
+        fences::lock_request(&mut tx, &entity_lease).await.unwrap();
+        fences::lock_exclusive(&mut tx, &[human, agent])
+            .await
+            .unwrap();
+        let global = fences::insert(&mut tx, human, &entity_lease, None)
+            .await
+            .unwrap();
+        let scoped = fences::insert(&mut tx, agent, &entity_lease, Some(human_key))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        sqlx::query("DELETE FROM users WHERE community_id = $1 AND pubkey = $2")
+            .bind(request.community_id.as_uuid())
+            .bind(human_key.to_bytes().to_vec())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let mut tx = db.pool.begin().await.unwrap();
+        assert_eq!(
+            fences::find(&mut tx, human).await.unwrap(),
+            Some(global.clone())
+        );
+        tx.commit().await.unwrap();
+
+        store.approve(request.id, "approver", None).await.unwrap();
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .unwrap()
+            .unwrap();
+        store.begin_quiescing(&claim.lease).await.unwrap();
+        let generation = store.fence(&claim.lease).await.unwrap();
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .unwrap();
+        store.mark_drained(&token).await.unwrap();
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .unwrap();
+        store.purge_postgres(&token).await.unwrap();
+        // This database-only fixture models the external cache adapter's
+        // completion before exercising PostgreSQL's logical-absence verifier.
+        store
+            .mark_cache_purged(&token, serde_json::json!({"test_cache": "empty"}))
+            .await
+            .unwrap();
+        store
+            .verify_postgres_logically_deleted(&token)
+            .await
+            .unwrap();
+        // Full row equality also proves that scoped restrictions were not
+        // widened to global ones by clearing scope_community_id.
+        let mut tx = db.pool.begin().await.unwrap();
+        assert_eq!(fences::find(&mut tx, human).await.unwrap(), Some(global));
+        assert_eq!(fences::find(&mut tx, agent).await.unwrap(), Some(scoped));
+        tx.commit().await.unwrap();
+    }
+
     async fn store() -> (Db, DeletionStore) {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
@@ -8507,6 +8617,37 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .as_uuid()
             .to_owned();
         seed_relay_admin_rows(&db, bystander).await;
+        // Operator workflow history is retained even when its provenance
+        // community is purged; it is not a tenant-owned serving table.
+        let entity = db
+            .user_deletion_store()
+            .submit("demo:history-retention", "operator", None)
+            .await
+            .unwrap();
+        db.entity_deletion_store()
+            .approve(
+                entity.id,
+                "approver",
+                entity.inventory_digest.as_deref().unwrap(),
+            )
+            .await
+            .unwrap();
+        let approvals_before = db
+            .entity_deletion_store()
+            .inspect(entity.id)
+            .await
+            .unwrap()
+            .approvals;
+        let history_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO entity_deletion_stage_history
+             (request_id, target_community_id, stage, is_current)
+             VALUES ($1, $2, 'drain', false) RETURNING id",
+        )
+        .bind(entity.id)
+        .bind(community)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
         let live = store
             .inventory_schema(request.community_id)
             .await
@@ -8539,6 +8680,25 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .await
             .expect("bindings");
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+
+        let retained: Uuid = sqlx::query_scalar(
+            "SELECT target_community_id FROM entity_deletion_stage_history WHERE id = $1",
+        )
+        .bind(history_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, community);
+        let approvals_after = db
+            .entity_deletion_store()
+            .inspect(entity.id)
+            .await
+            .unwrap()
+            .approvals;
+        assert_eq!(
+            serde_json::to_value(approvals_before).unwrap(),
+            serde_json::to_value(approvals_after).unwrap()
+        );
 
         assert_eq!(deleted.get("relay_admin_outbox"), Some(&2));
         assert_eq!(deleted.get("relay_admin_actions"), Some(&2));

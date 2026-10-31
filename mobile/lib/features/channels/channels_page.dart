@@ -1,3 +1,5 @@
+import '../agents/agents_sheet.dart';
+import '../../shared/agents/remote_agents.dart';
 import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/widgets/compose_morph_icon.dart';
@@ -290,17 +292,21 @@ class ChannelsPage extends HookConsumerWidget {
     Future<Rect?> prepareCommunityLanding() async {
       // The list snapshot precedes unread history and DM profile hydration.
       // Both can still change weight, labels, and sorting behind the picker.
-      final channels = ref.read(channelsProvider).requireValue;
-      final dmPubkeys = {
-        for (final channel in channels)
-          if (channel.isMember && !channel.isArchived && channel.isDm)
-            ...channel.participantPubkeys,
-      };
-      await Future.wait([
-        ref.read(channelsProvider.notifier).waitForUnreadCatchUp(),
-        if (dmPubkeys.isNotEmpty)
-          ref.read(userCacheProvider.notifier).preload(dmPubkeys.toList()),
-      ]);
+      // A restored list is already usable offline. Refresh its unread state
+      // and participant profiles behind the page instead of gating navigation.
+      if (!ref.read(channelsProvider.notifier).hasCachedSnapshot) {
+        final channels = ref.read(channelsProvider).requireValue;
+        final dmPubkeys = {
+          for (final channel in channels)
+            if (channel.isMember && !channel.isArchived && channel.isDm)
+              ...channel.participantPubkeys,
+        };
+        await Future.wait([
+          ref.read(channelsProvider.notifier).waitForUnreadCatchUp(),
+          if (dmPubkeys.isNotEmpty)
+            ref.read(userCacheProvider.notifier).preload(dmPubkeys.toList()),
+        ]);
+      }
       if (!context.mounted || !communityFlightActive.value) return null;
       // Settle Home's scale and scroll while the loading backdrop is opaque.
       onSettingsTransitionProgress(0);
@@ -447,6 +453,9 @@ class ChannelsPage extends HookConsumerWidget {
     final communityName = activeCommunity?.name.trim() ?? '';
     final topSectionGradient = context.appColors.topSectionGradient;
     final usesPinnedGradient = topSectionGradient != null;
+    final onAgents = supportsRemoteAgents(activeCommunity)
+        ? () => showAgents(context)
+        : null;
 
     return FrostedScaffold(
       backgroundColor: usesPinnedGradient
@@ -479,6 +488,14 @@ class ChannelsPage extends HookConsumerWidget {
           onPressed: openCommunitySwitcher,
         ),
         nativeActions: [
+          if (onAgents != null)
+            IosNavigationAction(
+              label: 'Agents',
+              symbol: 'person.2',
+              sharesBackground: true,
+              icon: BuzzIcons.bot,
+              onPressed: onAgents,
+            ),
           if (onSearch != null)
             IosNavigationAction(
               label: 'Search',
@@ -535,6 +552,7 @@ class ChannelsPage extends HookConsumerWidget {
         actions: [
           _ChannelHeaderActions(
             onSearch: onSearch,
+            onAgents: onAgents,
             onInbox: onInbox,
             hasUnreadInbox: hasUnreadInbox,
             onSettings: () {
