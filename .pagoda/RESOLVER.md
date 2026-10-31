@@ -31,6 +31,8 @@ The end-to-end fixture must exercise these failures before installation:
    sync can then run again without conflict.
 9. Upstream advances during a repair. Keep the active repair and its attempt
    budget; process the newer SHA after the active repair finishes.
+10. A result arrives after verification. Reject failed, decision, and duplicate
+    resolved outcomes without changing the receipt, attempt, budget, or delivery.
 
 ## Verification
 
@@ -102,8 +104,10 @@ python3 "$resolver_dir/resolver.py" --state "$resolver_dir" result \
 
 5. Push the verified commit using a normal fast-forward push. Fetch the current
    remote immediately before pushing. If it has advanced incompatibly, merge
-   its changes, repeat validation, and submit the same `result` command with
-   the new verified commit before publication. Never force-push. The driver observes
+   its changes and repeat validation and review before publication. Keep the
+   original verified commit in the new commit's ancestry and retain the new
+   checks separately; a verified attempt no longer accepts result reports.
+   Never force-push. The driver observes
    the verified commit on remote `pagoda` before marking it `complete`.
 6. Post the commit, checks, and workflow evidence in the originating thread.
    Completion observed without an agent receipt is labeled `synchronized`,
@@ -113,6 +117,9 @@ Report a failed attempt with `--outcome failed --reason '<concrete failure>'`.
 Report a product decision with `--outcome decision --reason '<specific choice>'`.
 Both use the same `result`, upstream, and attempt arguments. Only a reported
 agent failure consumes the budget. Duplicate or stale results are rejected.
+Verification is terminal for result reports: late failures and decisions cannot
+reopen the attempt or replace its receipt. Only observation of publication can
+advance it to `complete`.
 The first failure queues a second attempt in the same worktree. The second
 failure or an explicit decision notifies the configured decision maker. Later
 workflow runs cannot reopen that exhausted budget.

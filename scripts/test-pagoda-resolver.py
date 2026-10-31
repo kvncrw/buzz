@@ -433,6 +433,34 @@ def main():
     done("tick")
     assert read(done_state)["phase"] == "verified", "local commit is not publication"
     assert git(fork, "rev-parse", "pagoda") == original_fork
+    # A delayed failure must not reopen a verified attempt or change its receipt.
+    # Reject other duplicate outcomes too, before any state or delivery mutation.
+    verified_path = done_state / "repairs" / upstream_sha / "state.json"
+    verified_bytes = verified_path.read_bytes()
+    verified_events = events(done_boundary)
+    for outcome in ("failed", "decision", "resolved"):
+        stale = done(
+            "result",
+            "--upstream",
+            upstream_sha,
+            "--attempt",
+            "1",
+            "--outcome",
+            outcome,
+            "--reason",
+            "late result after verification",
+            "--commit",
+            repaired,
+            "--evidence",
+            str(evidence),
+            ok=False,
+        )
+        assert stale.returncode != 0, f"verified attempt accepted late {outcome}"
+        assert verified_path.read_bytes() == verified_bytes
+        done("tick")
+        assert read(done_state)["phase"] == "verified"
+        assert events(done_boundary) == verified_events
+    checks.append("verified attempts reject late failed/decision/resolved results without mutation")
     git(repair_work, "push", str(fork), "HEAD:refs/heads/pagoda")
     done("tick")
     assert read(done_state)["phase"] == "complete"

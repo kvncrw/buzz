@@ -446,8 +446,7 @@ class Resolver:
         state = self.load(args.upstream)
         require(state is not None, "unknown repair")
         require(
-            state["phase"] in ("requested", "verified")
-            and state["attempt"] == args.attempt,
+            state["phase"] == "requested" and state["attempt"] == args.attempt,
             "result must match the active, delivered attempt",
         )
         if args.outcome == "resolved":
