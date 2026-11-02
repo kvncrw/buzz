@@ -123,7 +123,8 @@ def assemble(args):
 def api(endpoint, optional=False):
     result = subprocess.run(["gh", "api", endpoint], text=True, capture_output=True)
     if result.returncode:
-        if optional and "HTTP 404" in result.stderr:
+        # commits/<missing tag> answers 422 "No commit found", not 404.
+        if optional and ("HTTP 404" in result.stderr or "No commit found for SHA" in result.stderr):
             return None
         raise ValueError(f"GitHub read failed: {result.stderr.strip()}")
     return json.loads(result.stdout)
