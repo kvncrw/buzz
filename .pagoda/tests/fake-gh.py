@@ -28,9 +28,16 @@ def flag(name):
 
 
 if args[0] == "api":
-    if "/releases/tags/" in args[1]:
-        finish(state.get("release"), None if state.get("release") else "HTTP 404")
-    if "/commits/" in args[1]:
+    endpoint = args[-1]
+    release = state.get("release")
+    if "/releases/tags/" in endpoint:
+        # Like GitHub: tag lookup cannot see a draft release.
+        visible = release if release and not release["draft"] else None
+        finish(visible, None if visible else "HTTP 404")
+    if endpoint.split("?")[0].endswith("/releases"):
+        assert "--paginate" in args and "--slurp" in args
+        finish([[release] if release else []])
+    if "/commits/" in endpoint:
         finish({"sha": state["tag_sha"]} if state.get("tag_sha") else None,
                None if state.get("tag_sha") else "HTTP 404")
 elif args[:2] == ["release", "create"]:
