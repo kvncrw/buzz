@@ -130,6 +130,18 @@ def api(endpoint, optional=False):
     return json.loads(result.stdout)
 
 
+def find_release(repo, tag, required=True):
+    # releases/tags/<tag> 404s while the release is a draft, so look it up in the list.
+    result = subprocess.run(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/releases?per_page=100"],
+                            text=True, capture_output=True)
+    if result.returncode:
+        raise ValueError(f"GitHub read failed: {result.stderr.strip()}")
+    matches = [r for page in json.loads(result.stdout) for r in page if r["tag_name"] == tag]
+    require(len(matches) <= 1, f"more than one release carries tag {tag}")
+    require(matches or not required, f"release {tag} not found")
+    return matches[0] if matches else None
+
+
 def verify_assets(release, expected):
     actual = release["assets"]
     require(len(actual) == len(expected) and {a["name"] for a in actual} == set(expected),
@@ -146,7 +158,6 @@ def publish(args):
     require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo), "invalid repository")
     expected = assemble(args)  # Both builds validated before any remote mutation.
     tag = "desktop-v" + args.version
-    endpoint = f"repos/{args.repo}/releases/tags/{tag}"
     commit_endpoint = f"repos/{args.repo}/commits/{tag}"
 
     def verify_tag(required=False):
@@ -158,7 +169,7 @@ def publish(args):
                 "existing release targets another source")
 
     verify_tag()
-    release = api(endpoint, optional=True)
+    release = find_release(args.repo, tag, required=False)
     if release:
         verify_identity(release)
         if not release["draft"]:
@@ -176,13 +187,13 @@ def publish(args):
             "--target", args.sha, "--title", f"Buzz Desktop {args.version} (pagoda)", "--notes", notes)
     run("gh", "release", "upload", tag, *(str(args.output / name) for name in expected),
         "--repo", args.repo, "--clobber")
-    release = api(endpoint)
+    release = find_release(args.repo, tag)
     verify_identity(release)
     require(release["draft"], "release became public during upload")
     verify_assets(release, expected)
     verify_tag()
     run("gh", "release", "edit", tag, "--repo", args.repo, "--draft=false", "--latest=false")
-    release = api(endpoint)
+    release = find_release(args.repo, tag)
     verify_identity(release)
     require(not release["draft"], "release is still a draft")
     verify_assets(release, expected)
