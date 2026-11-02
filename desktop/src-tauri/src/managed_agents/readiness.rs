@@ -414,8 +414,15 @@ impl AgentReadiness {
 /// but the normal path is OAuth PKCE.  We intentionally do NOT mark the
 /// token as required to avoid a false NotReady for users on OAuth.
 pub(crate) fn agent_readiness(effective: &EffectiveAgentEnv) -> AgentReadiness {
+    agent_readiness_with_env(effective, &|key| std::env::var(key).ok())
+}
+
+fn agent_readiness_with_env(
+    effective: &EffectiveAgentEnv,
+    inherited: &dyn Fn(&str) -> Option<String>,
+) -> AgentReadiness {
     let runtime = known_acp_runtime(&effective.effective_command);
-    let missing = collect_missing_requirements(effective, runtime);
+    let missing = collect_missing_requirements(effective, runtime, inherited);
     if missing.is_empty() {
         AgentReadiness::Ready
     } else {
@@ -429,6 +436,7 @@ pub(crate) fn agent_readiness(effective: &EffectiveAgentEnv) -> AgentReadiness {
 fn collect_missing_requirements(
     effective: &EffectiveAgentEnv,
     runtime: Option<&KnownAcpRuntime>,
+    inherited: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<Requirement> {
     let Some(rt) = runtime else {
         // Unknown/custom command — check that the binary is actually resolvable.
@@ -442,7 +450,7 @@ fn collect_missing_requirements(
     };
 
     match rt.id {
-        "buzz-agent" => buzz_agent_requirements(effective),
+        "buzz-agent" => buzz_agent_requirements(effective, inherited),
         "goose" => {
             // Read the file config once at the call site so the inner fn is
             // pure and unit-testable by injection.
@@ -460,7 +468,10 @@ fn collect_missing_requirements(
 }
 
 /// Requirements for buzz-agent (provider + model + provider-specific creds).
-fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
+fn buzz_agent_requirements(
+    effective: &EffectiveAgentEnv,
+    inherited: &dyn Fn(&str) -> Option<String>,
+) -> Vec<Requirement> {
     let mut missing = Vec::new();
 
     #[cfg(windows)]
@@ -513,10 +524,13 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         });
     }
 
-    // Provider-specific credential requirements.
-    // A key present with an empty value is treated as absent — matching the
-    // dialog's (envVars[key] ?? "").length === 0 emptiness check.
-    let env_key_missing = |key: &str| effective.env.get(key).is_none_or(|v| v.is_empty());
+    // Command inherits the Desktop environment below explicit configuration.
+    // An explicit empty value must still block startup. Consult inherited
+    // credentials here only; never copy them into configuration or snapshots.
+    let env_key_missing = |key: &str| match effective.env.get(key) {
+        Some(value) => value.is_empty(),
+        None => inherited(key).is_none_or(|value| value.is_empty()),
+    };
     match provider {
         Some("anthropic")
             if env_key_missing("ANTHROPIC_API_KEY") => {
@@ -672,6 +686,57 @@ mod tests {
 
     use super::*;
     use crate::managed_agents::discovery::known_acp_runtime_exact;
+
+    // Keep the existing cases independent of credentials on the test host.
+    fn agent_readiness(effective: &EffectiveAgentEnv) -> AgentReadiness {
+        agent_readiness_with_env(effective, &|_| None)
+    }
+
+    #[test]
+    fn inherited_openai_credential_readiness_and_precedence() {
+        for (configured, inherited, ready) in [
+            (None, Some("inherited-test-key"), true),
+            (None, None, false),
+            (None, Some(""), false),
+            (Some("configured-test-key"), None, true),
+            (
+                Some("configured-test-key"),
+                Some("inherited-test-key"),
+                true,
+            ),
+            (Some(""), Some("inherited-test-key"), false),
+        ] {
+            let mut env = make_env(
+                "buzz-agent",
+                env_with(&[
+                    ("BUZZ_AGENT_PROVIDER", "openai"),
+                    ("BUZZ_AGENT_MODEL", "spark-glm"),
+                ]),
+            );
+            if let Some(value) = configured {
+                env.env.insert("OPENAI_COMPAT_API_KEY".into(), value.into());
+            }
+            let before = env.env.clone();
+            let result = agent_readiness_with_env(&env, &|key| {
+                assert_eq!(key, "OPENAI_COMPAT_API_KEY");
+                assert!(configured.is_none(), "explicit configuration must win");
+                inherited.map(str::to_owned)
+            });
+            assert_eq!(result.is_ready(), ready);
+            assert_eq!(
+                env.env, before,
+                "inherited credentials must stay out of config"
+            );
+            if !ready {
+                assert_eq!(
+                    result.requirements(),
+                    &[Requirement::EnvKey {
+                        key: "OPENAI_COMPAT_API_KEY".into(),
+                    }]
+                );
+            }
+        }
+    }
 
     /// Build a minimal `EffectiveAgentEnv` with the given env map and command.
     fn make_env(command: &str, env: BTreeMap<String, String>) -> EffectiveAgentEnv {
