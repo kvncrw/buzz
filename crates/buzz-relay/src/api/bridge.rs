@@ -1213,30 +1213,16 @@ async fn submit_event_authed(
     let is_typing = kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR;
 
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
-    // Typing pulses arrive every few seconds per working agent, so their ban
-    // check uses the same short-TTL cache as their write-restriction check.
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
-    let membership = if is_typing {
-        super::relay_members::enforce_relay_membership_ephemeral(
-            state,
-            tenant,
-            &pubkey_bytes,
-            auth_tag,
-            signed_auth_created_at,
-            token_owner,
-        )
-        .await
-    } else {
-        super::relay_members::enforce_relay_membership(
-            state,
-            tenant,
-            &pubkey_bytes,
-            auth_tag,
-            signed_auth_created_at,
-            token_owner,
-        )
-        .await
-    };
+    let membership = super::relay_members::enforce_relay_membership(
+        state,
+        tenant,
+        &pubkey_bytes,
+        auth_tag,
+        signed_auth_created_at,
+        token_owner,
+    )
+    .await;
     let nip_oa_owner = match membership {
         // Membership only names the owner when it admitted the agent through
         // one. An agent admitted on its own (open relay, or a direct member of
@@ -2678,7 +2664,7 @@ pub async fn workflow_webhook(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+    let tenant = crate::tenant::bind_community(&*state, raw_host)
         .await
         .map_err(|_| not_found("workflow not found"))?;
     let community_id = tenant.community();
